@@ -54,7 +54,7 @@ def test_sender_selective_ack_advances_window_in_order() -> None:
     sock, channel = _local_channel()
     try:
         for seq in range(3):
-            channel._unacked[seq] = [_HEADER.pack(_TYPE_DATA, seq) + b"x", 0.0]
+            channel._unacked[seq] = [_HEADER.pack(_TYPE_DATA, seq) + b"x", time.monotonic(), False]
         channel._next_seq = 3
 
         channel._handle_datagram(_HEADER.pack(_TYPE_ACK, 1))  # acks only frame 1
@@ -68,6 +68,39 @@ def test_sender_selective_ack_advances_window_in_order() -> None:
         channel._handle_datagram(_HEADER.pack(_TYPE_ACK, 0))  # base now slides past 0,1,2
         assert channel._send_base == 3
         assert channel._unacked == {}
+    finally:
+        sock.close()
+
+
+def test_rto_estimator_updates_from_rtt_samples() -> None:
+    sock, channel = _local_channel()
+    try:
+        assert channel._srtt is None
+        channel._update_rto(0.1)
+        assert channel._srtt == 0.1
+        # RTO = SRTT + 4*RTTVAR = 0.1 + 4*0.05 = 0.30, within [min, max].
+        assert abs(channel._rto - 0.30) < 1e-9
+        channel._update_rto(0.1)  # agreeing samples shrink the variance term
+        assert channel._rto < 0.30
+        assert channel._min_rto <= channel._rto <= channel._max_rto
+    finally:
+        sock.close()
+
+
+def test_karn_excludes_retransmitted_frames_from_rtt() -> None:
+    sock, channel = _local_channel()
+    try:
+        # A retransmitted frame's ACK must not produce an RTT sample.
+        channel._unacked[0] = [_HEADER.pack(_TYPE_DATA, 0) + b"x", time.monotonic() - 0.05, True]
+        channel._next_seq = 1
+        channel._handle_datagram(_HEADER.pack(_TYPE_ACK, 0))
+        assert channel._srtt is None
+
+        # A frame that was never retransmitted does yield a sample.
+        channel._unacked[1] = [_HEADER.pack(_TYPE_DATA, 1) + b"y", time.monotonic() - 0.05, False]
+        channel._next_seq = 2
+        channel._handle_datagram(_HEADER.pack(_TYPE_ACK, 1))
+        assert channel._srtt is not None and channel._srtt > 0
     finally:
         sock.close()
 

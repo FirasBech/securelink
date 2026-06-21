@@ -193,7 +193,7 @@ pytest tests/ -v
 
 ## Known Limitations
 
-- WAN reliability is selective-repeat windowed ARQ (up to 32 frames in flight): per-frame ACKs, out-of-order receive buffering, retransmission of only the overdue frames, and a graceful-close linger that recovers a dropped final ACK. It is verified against 25% bidirectional packet loss. The retransmit timeout is fixed (no RTT estimation) and there is no congestion control — adaptive timing is the natural next step.
+- WAN reliability is selective-repeat windowed ARQ (up to 32 frames in flight): per-frame ACKs, out-of-order receive buffering, retransmission of only the overdue frames, and a graceful-close linger that recovers a dropped final ACK. It is verified against 25% bidirectional packet loss. The retransmit timeout adapts to measured RTT (RFC 6298, with Karn's algorithm and exponential backoff). There is still no congestion control — the window is a fixed size rather than AIMD — which is the natural next step.
 - The STUN client discovers a host's public endpoint, but the two peers still need an out-of-band channel to exchange those endpoints, and the simultaneous-open hole punch is not yet coordinated automatically. No TURN-style relay is bundled.
 - VLAN mode validates policy and metadata, not L2 802.1Q tagged frame generation.
 

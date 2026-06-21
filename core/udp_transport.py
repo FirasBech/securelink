@@ -9,7 +9,9 @@ it unchanged via the shared :class:`~core.transport.FrameChannel` interface.
 Each datagram is ``type(1) | seq(4) | payload`` where type is DATA or ACK. The
 sender keeps a sliding window of up to ``window`` unacked frames in flight, ACKs
 are *per-frame* (selective), and on timeout only the individual frames that are
-still unacked and overdue are retransmitted — not the whole window. The receiver
+still unacked and overdue are retransmitted — not the whole window. The
+retransmit timeout adapts to measured RTT (RFC 6298 RTO estimation with Karn's
+algorithm and exponential backoff). The receiver
 buffers out-of-order frames within its window and delivers them in order once the
 gaps fill. ``flush`` drains the window before close and ``linger`` re-services
 retransmissions afterwards, so a dropped final ACK is still recovered. Every pump
@@ -48,6 +50,11 @@ _MAX_DATAGRAM = 65535
 
 DEFAULT_WINDOW = 32
 
+# Adaptive retransmit timeout (RFC 6298-style RTO estimation).
+DEFAULT_INITIAL_RTO = 0.5
+RTO_MIN = 0.1
+RTO_MAX = 1.0
+
 # Conservative defaults to avoid IP fragmentation across the public internet.
 WAN_SAFE_MTU = 1200
 IP_UDP_OVERHEAD = 28  # 20-byte IPv4 header + 8-byte UDP header
@@ -72,7 +79,9 @@ class ReliableUdpChannel:
         *,
         allowlist: tuple[str, ...] = (),
         window: int = DEFAULT_WINDOW,
-        ack_timeout: float = 0.5,
+        initial_rto: float = DEFAULT_INITIAL_RTO,
+        min_rto: float = RTO_MIN,
+        max_rto: float = RTO_MAX,
         max_retries: int = 40,
         recv_timeout: float = 20.0,
     ) -> None:
@@ -80,15 +89,23 @@ class ReliableUdpChannel:
         self._peer_addr = peer_addr
         self._allowlist = allowlist
         self._window = max(1, window)
-        self._ack_timeout = ack_timeout
         self._max_retries = max_retries
         self._recv_timeout = recv_timeout
 
-        # Send side: unacked frames are [send_base, next_seq); each carries its
-        # own last-sent timestamp so only overdue frames are retransmitted.
+        # Adaptive RTO (RFC 6298): smoothed RTT + variance, with Karn's algorithm
+        # (ignore samples from retransmitted frames) and exponential backoff.
+        self._min_rto = min_rto
+        self._max_rto = max_rto
+        self._rto = initial_rto
+        self._srtt: float | None = None
+        self._rttvar = 0.0
+
+        # Send side: unacked frames are [send_base, next_seq); each entry is
+        # [datagram, last_send_time, retransmitted] so only overdue frames are
+        # resent and retransmitted frames are excluded from RTT sampling.
         self._send_base = 0
         self._next_seq = 0
-        self._unacked: dict[int, list] = {}  # seq -> [datagram, last_send_time]
+        self._unacked: dict[int, list] = {}
         self._acked: set[int] = set()
         self._retries = 0
 
@@ -118,14 +135,30 @@ class ReliableUdpChannel:
         except OSError:
             pass
 
+    def _update_rto(self, rtt: float) -> None:
+        """Fold a fresh RTT sample into the smoothed RTO (RFC 6298)."""
+
+        if rtt < 0:
+            return
+        if self._srtt is None:
+            self._srtt = rtt
+            self._rttvar = rtt / 2
+        else:
+            self._rttvar = 0.75 * self._rttvar + 0.25 * abs(self._srtt - rtt)
+            self._srtt = 0.875 * self._srtt + 0.125 * rtt
+        self._rto = min(self._max_rto, max(self._min_rto, self._srtt + 4 * self._rttvar))
+
     def _handle_datagram(self, data: bytes) -> None:
         if len(data) < _HEADER_LEN:
             return
         mtype, seq = _HEADER.unpack(data[:_HEADER_LEN])
         if mtype == _TYPE_ACK:
             # Selective ACK: this specific frame is delivered.
-            if seq in self._unacked:
-                del self._unacked[seq]
+            entry = self._unacked.pop(seq, None)
+            if entry is not None:
+                # Karn's algorithm: only sample RTT from frames never retransmitted.
+                if not entry[2]:
+                    self._update_rto(time.monotonic() - entry[1])
                 self._acked.add(seq)
                 self._retries = 0
                 while self._send_base in self._acked:
@@ -153,11 +186,16 @@ class ReliableUdpChannel:
                 f"reliable UDP timed out after {self._max_retries} retries"
             )
         now = time.monotonic()
+        retransmitted_any = False
         for entry in self._unacked.values():
-            datagram, last_sent = entry
-            if now - last_sent >= self._ack_timeout:
-                self._sock.sendto(datagram, self._peer_addr)
+            if now - entry[1] >= self._rto:
+                self._sock.sendto(entry[0], self._peer_addr)
                 entry[1] = now
+                entry[2] = True  # exclude from RTT sampling (Karn's algorithm)
+                retransmitted_any = True
+        if retransmitted_any:
+            # Back off until a fresh, valid RTT sample recomputes the RTO.
+            self._rto = min(self._max_rto, self._rto * 2)
 
     def _pump(self, *, block: bool) -> None:
         """Process one (blocking) or all immediately-available datagrams.
@@ -166,7 +204,7 @@ class ReliableUdpChannel:
         """
 
         if block:
-            self._sock.settimeout(self._ack_timeout)
+            self._sock.settimeout(self._rto)
             try:
                 data, addr = self._sock.recvfrom(_MAX_DATAGRAM)
             except socket.timeout:
@@ -196,7 +234,7 @@ class ReliableUdpChannel:
             self._pump(block=True)
         seq = self._next_seq
         datagram = _HEADER.pack(_TYPE_DATA, seq) + payload
-        self._unacked[seq] = [datagram, time.monotonic()]
+        self._unacked[seq] = [datagram, time.monotonic(), False]
         self._sock.sendto(datagram, self._peer_addr)
         self._next_seq += 1
         # Opportunistically absorb any ACKs/DATA so the window keeps sliding.
@@ -213,22 +251,27 @@ class ReliableUdpChannel:
     def flush(self) -> None:
         """Block until every sent frame has been cumulatively ACKed."""
 
-        deadline = time.monotonic() + self._max_retries * self._ack_timeout + 1.0
+        deadline = time.monotonic() + self._max_retries * self._max_rto + 1.0
         while self._send_base < self._next_seq:
             if time.monotonic() >= deadline:
                 raise TransportError("reliable UDP flush timed out")
             self._pump(block=True)
 
-    def linger(self, *, poll_timeout: float = 0.3, idle_rounds: int = 4) -> None:
+    def linger(self, *, poll_timeout: float = 0.3, idle_rounds: int | None = None) -> None:
         """Keep re-ACKing retransmissions briefly after the transfer completes.
 
         Recovers a dropped final ACK: if the sender's last frame is unacked it
         retransmits, and we answer until the link has been idle for
         ``idle_rounds`` consecutive polls. Any datagram resets the idle counter.
+        The idle window must outlast the sender's worst-case (backed-off) RTO, or
+        the receiver could close mid-retransmit, so it is derived from
+        ``max_rto`` when not given explicitly.
         """
 
         if self._peer_addr is None:
             return
+        if idle_rounds is None:
+            idle_rounds = int(self._max_rto / poll_timeout) + 2
         idle = 0
         while idle < idle_rounds:
             self._sock.settimeout(poll_timeout)

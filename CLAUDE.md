@@ -52,7 +52,8 @@ Three layers, strict one-directional dependency: `ui` → `core` + `security`.
 - **udp_transport.py** — WAN mode. `ReliableUdpChannel` is a selective-repeat
   windowed ARQ `FrameChannel` over UDP (per-frame ACKs, out-of-order receive
   buffering, up to `DEFAULT_WINDOW` frames in flight, retransmit only overdue
-  frames), so it reuses `stream_send`/`stream_receive` verbatim. Single-threaded:
+  frames, RTT-adaptive RTO per RFC 6298 with Karn's algorithm), so it reuses
+  `stream_send`/`stream_receive` verbatim. Single-threaded:
   every `_pump` processes both ACKs and DATA, so the window self-heals across the
   handshake's request/response turns. `stream_send` calls `flush()` to drain the
   window before close; the receiver then `linger()`s to re-ACK retransmits —
@@ -99,9 +100,9 @@ ciphertext   N bytes   AES-256-GCM, 16-byte tag appended
 
 ## Known gaps (do not assume these work)
 
-- **WAN reliability is selective-repeat** — windowed and loss-tested, but the
-  retransmit timeout is fixed (no RTT estimation) and there is no congestion
-  control. Adaptive timing is the efficiency follow-up.
+- **WAN reliability is selective-repeat** — windowed, loss-tested, with an
+  RTT-adaptive RTO (RFC 6298). Still no congestion control: the window is a fixed
+  size rather than AIMD, which is the efficiency follow-up.
 - **NAT hole punching is not coordinated.** STUN discovers each peer's public
   endpoint, but exchanging those endpoints and the simultaneous-open punch is
   still manual/out-of-band; no TURN-style relay is bundled.
