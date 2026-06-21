@@ -1,0 +1,291 @@
+"""Reliable UDP transport for SecureLink's WAN mode.
+
+UDP is required for STUN-assisted NAT traversal (a hole punched through a NAT is
+a UDP binding), but UDP is unreliable and unordered. This module adds a small
+Go-Back-N ARQ on top of UDP so the existing capsule handshake and streaming code
+(``core.transport.stream_send`` / ``stream_receive``) can run over it unchanged
+via the shared :class:`~core.transport.FrameChannel` interface.
+
+Each datagram is ``type(1) | seq(4) | payload`` where type is DATA or ACK. The
+sender keeps a sliding window of up to ``window`` unacked frames in flight and
+retransmits the whole window on timeout; the receiver delivers strictly in order,
+discards out-of-order/duplicate frames, and sends a *cumulative* ACK of the
+highest in-order sequence it has. ``flush`` drains the window before close and
+``linger`` re-services retransmissions afterwards, so a dropped final ACK is
+still recovered. Every pump processes both ACKs and DATA, so the window stays
+consistent across the handshake's request/response turns without a background
+thread.
+
+Single-threaded and deterministic. All failures raise
+``core.transport.TransportError``.
+"""
+
+from __future__ import annotations
+
+import socket
+import struct
+import time
+from collections import deque
+from pathlib import Path
+from typing import Callable
+
+from .capsule import AES_TAG_LEN, CAPSULE_PREFIX
+from .transport import (
+    TransferStats,
+    TransportConfig,
+    TransportError,
+    _resolve_host_address,
+    _validate_allowlist,
+    stream_receive,
+    stream_send,
+)
+
+_TYPE_DATA = 0
+_TYPE_ACK = 1
+_HEADER = struct.Struct("!BI")
+_HEADER_LEN = _HEADER.size  # 5
+_MAX_DATAGRAM = 65535
+
+DEFAULT_WINDOW = 32
+
+# Conservative defaults to avoid IP fragmentation across the public internet.
+WAN_SAFE_MTU = 1200
+IP_UDP_OVERHEAD = 28  # 20-byte IPv4 header + 8-byte UDP header
+
+
+def wan_chunk_size(mtu: int = WAN_SAFE_MTU) -> int:
+    """Largest plaintext chunk that keeps a capsule datagram under ``mtu``."""
+
+    size = mtu - IP_UDP_OVERHEAD - _HEADER_LEN - CAPSULE_PREFIX - AES_TAG_LEN
+    if size < 1:
+        raise TransportError(f"MTU {mtu} too small for a reliable UDP capsule")
+    return size
+
+
+class ReliableUdpChannel:
+    """Go-Back-N reliable :class:`~core.transport.FrameChannel` over UDP."""
+
+    def __init__(
+        self,
+        sock: socket.socket,
+        peer_addr: tuple[str, int] | None = None,
+        *,
+        allowlist: tuple[str, ...] = (),
+        window: int = DEFAULT_WINDOW,
+        ack_timeout: float = 0.5,
+        max_retries: int = 40,
+        recv_timeout: float = 20.0,
+    ) -> None:
+        self._sock = sock
+        self._peer_addr = peer_addr
+        self._allowlist = allowlist
+        self._window = max(1, window)
+        self._ack_timeout = ack_timeout
+        self._max_retries = max_retries
+        self._recv_timeout = recv_timeout
+
+        # Send side (Go-Back-N): unacked frames are [send_base, next_seq).
+        self._send_base = 0
+        self._next_seq = 0
+        self._send_buffer: dict[int, bytes] = {}
+        self._retries = 0
+
+        # Receive side: strictly in-order delivery.
+        self._recv_seq = 0
+        self._delivered: deque[bytes] = deque()
+
+        if peer_addr is not None and allowlist:
+            _validate_allowlist(peer_addr[0], allowlist)
+
+    @property
+    def peer_addr(self) -> tuple[str, int] | None:
+        return self._peer_addr
+
+    def _learn_peer(self, addr: tuple[str, int]) -> None:
+        if self._peer_addr is None:
+            if self._allowlist:
+                _validate_allowlist(addr[0], self._allowlist)
+            self._peer_addr = addr
+
+    def _handle_datagram(self, data: bytes) -> None:
+        if len(data) < _HEADER_LEN:
+            return
+        mtype, seq = _HEADER.unpack(data[:_HEADER_LEN])
+        if mtype == _TYPE_ACK:
+            # Cumulative ACK: everything up to and including ``seq`` is delivered.
+            if self._send_base <= seq < self._next_seq:
+                for acked in range(self._send_base, seq + 1):
+                    self._send_buffer.pop(acked, None)
+                self._send_base = seq + 1
+                self._retries = 0
+        elif mtype == _TYPE_DATA:
+            if seq == self._recv_seq:
+                self._delivered.append(data[_HEADER_LEN:])
+                self._recv_seq += 1
+            # Out-of-order or duplicate frames are dropped (Go-Back-N receiver).
+            # Always re-advertise the highest in-order sequence we hold.
+            if self._recv_seq > 0 and self._peer_addr is not None:
+                try:
+                    self._sock.sendto(
+                        _HEADER.pack(_TYPE_ACK, self._recv_seq - 1), self._peer_addr
+                    )
+                except OSError:
+                    pass
+
+    def _retransmit_window(self) -> None:
+        if self._send_base >= self._next_seq:
+            return
+        self._retries += 1
+        if self._retries > self._max_retries:
+            raise TransportError(
+                f"reliable UDP timed out after {self._max_retries} retries"
+            )
+        for seq in range(self._send_base, self._next_seq):
+            self._sock.sendto(self._send_buffer[seq], self._peer_addr)
+
+    def _pump(self, *, block: bool) -> None:
+        """Process one (blocking) or all immediately-available datagrams.
+
+        A blocking pump that times out retransmits the unacked window.
+        """
+
+        if block:
+            self._sock.settimeout(self._ack_timeout)
+            try:
+                data, addr = self._sock.recvfrom(_MAX_DATAGRAM)
+            except socket.timeout:
+                self._retransmit_window()
+                return
+            except OSError:
+                return
+            self._learn_peer(addr)
+            self._handle_datagram(data)
+            return
+
+        self._sock.settimeout(0.0)
+        while True:
+            try:
+                data, addr = self._sock.recvfrom(_MAX_DATAGRAM)
+            except (BlockingIOError, socket.timeout):
+                return
+            except OSError:
+                return
+            self._learn_peer(addr)
+            self._handle_datagram(data)
+
+    def send_frame(self, payload: bytes) -> None:
+        if self._peer_addr is None:
+            raise TransportError("reliable UDP send before peer address is known")
+        while (self._next_seq - self._send_base) >= self._window:
+            self._pump(block=True)
+        seq = self._next_seq
+        datagram = _HEADER.pack(_TYPE_DATA, seq) + payload
+        self._send_buffer[seq] = datagram
+        self._sock.sendto(datagram, self._peer_addr)
+        self._next_seq += 1
+        # Opportunistically absorb any ACKs/DATA so the window keeps sliding.
+        self._pump(block=False)
+
+    def recv_frame(self) -> bytes:
+        deadline = time.monotonic() + self._recv_timeout
+        while not self._delivered:
+            if time.monotonic() >= deadline:
+                raise TransportError("reliable UDP receive timed out")
+            self._pump(block=True)
+        return self._delivered.popleft()
+
+    def flush(self) -> None:
+        """Block until every sent frame has been cumulatively ACKed."""
+
+        deadline = time.monotonic() + self._max_retries * self._ack_timeout + 1.0
+        while self._send_base < self._next_seq:
+            if time.monotonic() >= deadline:
+                raise TransportError("reliable UDP flush timed out")
+            self._pump(block=True)
+
+    def linger(self, *, poll_timeout: float = 0.3, idle_rounds: int = 4) -> None:
+        """Keep re-ACKing retransmissions briefly after the transfer completes.
+
+        Recovers a dropped final ACK: if the sender's last frame is unacked it
+        retransmits, and we answer until the link has been idle for
+        ``idle_rounds`` consecutive polls. Any datagram resets the idle counter.
+        """
+
+        if self._peer_addr is None:
+            return
+        idle = 0
+        while idle < idle_rounds:
+            self._sock.settimeout(poll_timeout)
+            try:
+                data, _addr = self._sock.recvfrom(_MAX_DATAGRAM)
+            except (socket.timeout, OSError):
+                idle += 1
+                continue
+            idle = 0
+            self._handle_datagram(data)
+
+
+def udp_send_file(
+    file_path: str | Path,
+    peer_host: str,
+    peer_port: int,
+    *,
+    config: TransportConfig | None = None,
+    trust_prompt: Callable[[str], bool] | None = None,
+    base_dir: Path | None = None,
+    chunk_size: int | None = None,
+) -> TransferStats:
+    """Send a file to ``peer_host:peer_port`` over reliable UDP (WAN mode)."""
+
+    transfer_path = Path(file_path)
+    if not transfer_path.exists():
+        raise FileNotFoundError(transfer_path)
+
+    transfer_config = config or TransportConfig(mode="wan", port=peer_port)
+    peer_addr = (_resolve_host_address(peer_host), peer_port)
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        channel = ReliableUdpChannel(sock, peer_addr)
+        return stream_send(
+            channel,
+            transfer_path,
+            transfer_config,
+            trust_prompt=trust_prompt,
+            base_dir=base_dir,
+            chunk_size=chunk_size if chunk_size is not None else wan_chunk_size(),
+        )
+    finally:
+        sock.close()
+
+
+def udp_receive_file(
+    *,
+    config: TransportConfig | None = None,
+    trust_prompt: Callable[[str], bool] | None = None,
+    base_dir: Path | None = None,
+) -> tuple[Path, TransferStats]:
+    """Receive a file over reliable UDP (WAN mode).
+
+    Binds a UDP socket and learns the peer's address from its first datagram;
+    the allowlist (if any) is enforced the moment that address is learned.
+    """
+
+    transfer_config = config or TransportConfig(mode="wan")
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind((transfer_config.bind_host, transfer_config.port))
+        channel = ReliableUdpChannel(sock, None, allowlist=transfer_config.allowlist)
+        result = stream_receive(
+            channel,
+            transfer_config,
+            trust_prompt=trust_prompt,
+            base_dir=base_dir,
+        )
+        # Stay available briefly so a dropped final ACK can be recovered.
+        channel.linger()
+        return result
+    finally:
+        sock.close()
