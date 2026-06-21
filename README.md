@@ -2,14 +2,14 @@
 
 SecureLink is a security-focused Python file transfer tool for LAN, WAN, and enterprise VLAN environments. It demonstrates authenticated encryption, session identity, packet inspection, and audit logging for cross-network file transfer.
 
-LAN and VLAN use direct TCP transfer. WAN uses a reliable-UDP transport (Go-Back-N windowed ARQ over UDP) with a built-in RFC 8489 STUN client for public-endpoint discovery. NAT hole-punch coordination (out-of-band signaling) and a TURN-style relay are not yet bundled; see Known Limitations.
+LAN and VLAN use direct TCP transfer. WAN uses a reliable-UDP transport (selective-repeat windowed ARQ over UDP) with a built-in RFC 8489 STUN client for public-endpoint discovery. NAT hole-punch coordination (out-of-band signaling) and a TURN-style relay are not yet bundled; see Known Limitations.
 
 ## What It Does
 
 | Mode | Transport | Discovery / Control |
 | --- | --- | --- |
 | LAN | Direct TCP, jumbo-frame-aware chunking | mDNS peer discovery |
-| WAN | Reliable UDP (Go-Back-N windowed ARQ) + STUN endpoint discovery | Manual peer entry |
+| WAN | Reliable UDP (selective-repeat windowed ARQ) + STUN endpoint discovery | Manual peer entry |
 | VLAN | TCP transfer with VLAN policy checks | Per-VLAN ACL metadata |
 
 ## Security Features
@@ -34,11 +34,11 @@ Verified in this workspace:
 - Core crypto, capsule, auth, discovery, STUN, transport, UDP transport, guard, and UI modules are in place.
 - LAN, VLAN, and WAN (reliable-UDP) loopback tests pass, and the STUN codec is unit-tested.
 - The dashboard launches with `python -m ui.dashboard`.
-- The full test suite is green at 22 passed.
+- The full test suite is green.
 
 Current caveats:
 
-- WAN reliability is stop-and-wait ARQ (correct but modest throughput); a windowed ARQ is future work.
+- WAN reliability is a selective-repeat windowed ARQ, verified under simulated bidirectional packet loss.
 - NAT hole-punch coordination needs an out-of-band signaling exchange, and no TURN-style relay is bundled.
 - VLAN support is policy enforcement and metadata, not 802.1Q tagged frame generation.
 
@@ -87,7 +87,7 @@ securelink/
 │   ├── discovery.py     mDNS announce + scan
 │   ├── stun.py          RFC 8489 STUN client (public-endpoint discovery)
 │   ├── transport.py     TCP transfer + shared channel/handshake/streaming
-│   └── udp_transport.py Reliable-UDP (WAN) transport, stop-and-wait ARQ
+│   └── udp_transport.py Reliable-UDP (WAN) transport, selective-repeat ARQ
 ├── security/
 │   ├── capture.py       Scapy packet capture, JSON event logging
 │   ├── arp_guard.py     ARP table baseline + spoof detection
@@ -193,7 +193,7 @@ pytest tests/ -v
 
 ## Known Limitations
 
-- WAN reliability is Go-Back-N windowed ARQ (up to 32 frames in flight) with cumulative ACKs, retransmission, duplicate detection, and a graceful-close linger that recovers a dropped final ACK. It is verified against 25% bidirectional packet loss. A selective-repeat ARQ (retransmitting only the missing frame rather than the whole window) would be more efficient under heavy loss and is the natural next step.
+- WAN reliability is selective-repeat windowed ARQ (up to 32 frames in flight): per-frame ACKs, out-of-order receive buffering, retransmission of only the overdue frames, and a graceful-close linger that recovers a dropped final ACK. It is verified against 25% bidirectional packet loss. The retransmit timeout is fixed (no RTT estimation) and there is no congestion control — adaptive timing is the natural next step.
 - The STUN client discovers a host's public endpoint, but the two peers still need an out-of-band channel to exchange those endpoints, and the simultaneous-open hole punch is not yet coordinated automatically. No TURN-style relay is bundled.
 - VLAN mode validates policy and metadata, not L2 802.1Q tagged frame generation.
 

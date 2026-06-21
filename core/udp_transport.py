@@ -2,19 +2,19 @@
 
 UDP is required for STUN-assisted NAT traversal (a hole punched through a NAT is
 a UDP binding), but UDP is unreliable and unordered. This module adds a small
-Go-Back-N ARQ on top of UDP so the existing capsule handshake and streaming code
-(``core.transport.stream_send`` / ``stream_receive``) can run over it unchanged
-via the shared :class:`~core.transport.FrameChannel` interface.
+selective-repeat ARQ on top of UDP so the existing capsule handshake and
+streaming code (``core.transport.stream_send`` / ``stream_receive``) can run over
+it unchanged via the shared :class:`~core.transport.FrameChannel` interface.
 
 Each datagram is ``type(1) | seq(4) | payload`` where type is DATA or ACK. The
-sender keeps a sliding window of up to ``window`` unacked frames in flight and
-retransmits the whole window on timeout; the receiver delivers strictly in order,
-discards out-of-order/duplicate frames, and sends a *cumulative* ACK of the
-highest in-order sequence it has. ``flush`` drains the window before close and
-``linger`` re-services retransmissions afterwards, so a dropped final ACK is
-still recovered. Every pump processes both ACKs and DATA, so the window stays
-consistent across the handshake's request/response turns without a background
-thread.
+sender keeps a sliding window of up to ``window`` unacked frames in flight, ACKs
+are *per-frame* (selective), and on timeout only the individual frames that are
+still unacked and overdue are retransmitted — not the whole window. The receiver
+buffers out-of-order frames within its window and delivers them in order once the
+gaps fill. ``flush`` drains the window before close and ``linger`` re-services
+retransmissions afterwards, so a dropped final ACK is still recovered. Every pump
+processes both ACKs and DATA, so the window stays consistent across the
+handshake's request/response turns without a background thread.
 
 Single-threaded and deterministic. All failures raise
 ``core.transport.TransportError``.
@@ -63,7 +63,7 @@ def wan_chunk_size(mtu: int = WAN_SAFE_MTU) -> int:
 
 
 class ReliableUdpChannel:
-    """Go-Back-N reliable :class:`~core.transport.FrameChannel` over UDP."""
+    """Selective-repeat reliable :class:`~core.transport.FrameChannel` over UDP."""
 
     def __init__(
         self,
@@ -84,14 +84,17 @@ class ReliableUdpChannel:
         self._max_retries = max_retries
         self._recv_timeout = recv_timeout
 
-        # Send side (Go-Back-N): unacked frames are [send_base, next_seq).
+        # Send side: unacked frames are [send_base, next_seq); each carries its
+        # own last-sent timestamp so only overdue frames are retransmitted.
         self._send_base = 0
         self._next_seq = 0
-        self._send_buffer: dict[int, bytes] = {}
+        self._unacked: dict[int, list] = {}  # seq -> [datagram, last_send_time]
+        self._acked: set[int] = set()
         self._retries = 0
 
-        # Receive side: strictly in-order delivery.
+        # Receive side: out-of-order frames are buffered until the gap fills.
         self._recv_seq = 0
+        self._recv_buffer: dict[int, bytes] = {}
         self._delivered: deque[bytes] = deque()
 
         if peer_addr is not None and allowlist:
@@ -107,46 +110,59 @@ class ReliableUdpChannel:
                 _validate_allowlist(addr[0], self._allowlist)
             self._peer_addr = addr
 
+    def _send_ack(self, seq: int) -> None:
+        if self._peer_addr is None:
+            return
+        try:
+            self._sock.sendto(_HEADER.pack(_TYPE_ACK, seq), self._peer_addr)
+        except OSError:
+            pass
+
     def _handle_datagram(self, data: bytes) -> None:
         if len(data) < _HEADER_LEN:
             return
         mtype, seq = _HEADER.unpack(data[:_HEADER_LEN])
         if mtype == _TYPE_ACK:
-            # Cumulative ACK: everything up to and including ``seq`` is delivered.
-            if self._send_base <= seq < self._next_seq:
-                for acked in range(self._send_base, seq + 1):
-                    self._send_buffer.pop(acked, None)
-                self._send_base = seq + 1
+            # Selective ACK: this specific frame is delivered.
+            if seq in self._unacked:
+                del self._unacked[seq]
+                self._acked.add(seq)
                 self._retries = 0
+                while self._send_base in self._acked:
+                    self._acked.discard(self._send_base)
+                    self._send_base += 1
         elif mtype == _TYPE_DATA:
-            if seq == self._recv_seq:
-                self._delivered.append(data[_HEADER_LEN:])
-                self._recv_seq += 1
-            # Out-of-order or duplicate frames are dropped (Go-Back-N receiver).
-            # Always re-advertise the highest in-order sequence we hold.
-            if self._recv_seq > 0 and self._peer_addr is not None:
-                try:
-                    self._sock.sendto(
-                        _HEADER.pack(_TYPE_ACK, self._recv_seq - 1), self._peer_addr
-                    )
-                except OSError:
-                    pass
+            payload = data[_HEADER_LEN:]
+            if seq < self._recv_seq:
+                # Already delivered; re-ACK so the sender stops retransmitting.
+                self._send_ack(seq)
+            elif seq < self._recv_seq + self._window:
+                self._recv_buffer.setdefault(seq, payload)
+                while self._recv_seq in self._recv_buffer:
+                    self._delivered.append(self._recv_buffer.pop(self._recv_seq))
+                    self._recv_seq += 1
+                self._send_ack(seq)
+            # Frames beyond the receive window are ignored (sender will resend).
 
-    def _retransmit_window(self) -> None:
-        if self._send_base >= self._next_seq:
+    def _retransmit_overdue(self) -> None:
+        if not self._unacked:
             return
         self._retries += 1
         if self._retries > self._max_retries:
             raise TransportError(
                 f"reliable UDP timed out after {self._max_retries} retries"
             )
-        for seq in range(self._send_base, self._next_seq):
-            self._sock.sendto(self._send_buffer[seq], self._peer_addr)
+        now = time.monotonic()
+        for entry in self._unacked.values():
+            datagram, last_sent = entry
+            if now - last_sent >= self._ack_timeout:
+                self._sock.sendto(datagram, self._peer_addr)
+                entry[1] = now
 
     def _pump(self, *, block: bool) -> None:
         """Process one (blocking) or all immediately-available datagrams.
 
-        A blocking pump that times out retransmits the unacked window.
+        A blocking pump that times out retransmits only the overdue frames.
         """
 
         if block:
@@ -154,7 +170,7 @@ class ReliableUdpChannel:
             try:
                 data, addr = self._sock.recvfrom(_MAX_DATAGRAM)
             except socket.timeout:
-                self._retransmit_window()
+                self._retransmit_overdue()
                 return
             except OSError:
                 return
@@ -180,7 +196,7 @@ class ReliableUdpChannel:
             self._pump(block=True)
         seq = self._next_seq
         datagram = _HEADER.pack(_TYPE_DATA, seq) + payload
-        self._send_buffer[seq] = datagram
+        self._unacked[seq] = [datagram, time.monotonic()]
         self._sock.sendto(datagram, self._peer_addr)
         self._next_seq += 1
         # Opportunistically absorb any ACKs/DATA so the window keeps sliding.

@@ -34,36 +34,40 @@ def _free_udp_port() -> int:
         return sock.getsockname()[1]
 
 
-def test_receiver_delivers_in_order_and_drops_out_of_order() -> None:
+def test_receiver_buffers_out_of_order_then_delivers_in_order() -> None:
     sock, channel = _local_channel()
     try:
         channel._handle_datagram(_HEADER.pack(_TYPE_DATA, 0) + b"a")
-        channel._handle_datagram(_HEADER.pack(_TYPE_DATA, 2) + b"c")  # gap -> dropped
-        channel._handle_datagram(_HEADER.pack(_TYPE_DATA, 1) + b"b")
+        channel._handle_datagram(_HEADER.pack(_TYPE_DATA, 2) + b"c")  # gap -> buffered
+        assert list(channel._delivered) == [b"a"]
+        assert channel._recv_seq == 1
+
+        channel._handle_datagram(_HEADER.pack(_TYPE_DATA, 1) + b"b")  # fills gap -> 1 and 2 deliver
         channel._handle_datagram(_HEADER.pack(_TYPE_DATA, 0) + b"dup")  # duplicate -> dropped
-        assert list(channel._delivered) == [b"a", b"b"]
-        assert channel._recv_seq == 2
+        assert list(channel._delivered) == [b"a", b"b", b"c"]
+        assert channel._recv_seq == 3
     finally:
         sock.close()
 
 
-def test_sender_cumulative_ack_advances_window() -> None:
+def test_sender_selective_ack_advances_window_in_order() -> None:
     sock, channel = _local_channel()
     try:
         for seq in range(3):
-            channel._send_buffer[seq] = _HEADER.pack(_TYPE_DATA, seq) + b"x"
+            channel._unacked[seq] = [_HEADER.pack(_TYPE_DATA, seq) + b"x", 0.0]
         channel._next_seq = 3
 
-        channel._handle_datagram(_HEADER.pack(_TYPE_ACK, 1))  # cumulative ack of 0 and 1
-        assert channel._send_base == 2
-        assert set(channel._send_buffer) == {2}
+        channel._handle_datagram(_HEADER.pack(_TYPE_ACK, 1))  # acks only frame 1
+        assert channel._send_base == 0  # base waits for the still-missing frame 0
+        assert set(channel._unacked) == {0, 2}
 
-        channel._handle_datagram(_HEADER.pack(_TYPE_ACK, 0))  # stale ack -> ignored
-        assert channel._send_base == 2
+        channel._handle_datagram(_HEADER.pack(_TYPE_ACK, 2))  # acks frame 2
+        assert channel._send_base == 0
+        assert set(channel._unacked) == {0}
 
-        channel._handle_datagram(_HEADER.pack(_TYPE_ACK, 2))
+        channel._handle_datagram(_HEADER.pack(_TYPE_ACK, 0))  # base now slides past 0,1,2
         assert channel._send_base == 3
-        assert channel._send_buffer == {}
+        assert channel._unacked == {}
     finally:
         sock.close()
 
