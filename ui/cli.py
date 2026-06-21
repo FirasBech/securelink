@@ -12,34 +12,45 @@ from core.transport import TransferStats, TransportConfig, receive_file, send_fi
 from core.udp_transport import udp_receive_file, udp_send_file
 from security.capture import JsonEventLogger
 
-SESSION_STATE_PATH = Path.home() / ".securelink" / "session.json"
-LOG_DIR = Path.home() / ".securelink" / "logs"
+def _securelink_root(base_dir: Path | None) -> Path:
+    return (base_dir or Path.home()) / ".securelink"
 
 
-def _load_session_state() -> dict[str, Any]:
-    if not SESSION_STATE_PATH.exists():
-        return {"bytes_sent": 0, "bytes_received": 0, "chunks": 0, "alerts": 0}
+def _base_dir(args: argparse.Namespace) -> Path | None:
+    state_dir = getattr(args, "state_dir", None)
+    return Path(state_dir) if state_dir else None
+
+
+def _default_state() -> dict[str, Any]:
+    return {"bytes_sent": 0, "bytes_received": 0, "chunks": 0, "alerts": 0}
+
+
+def _load_session_state(base_dir: Path | None) -> dict[str, Any]:
+    path = _securelink_root(base_dir) / "session.json"
+    if not path.exists():
+        return _default_state()
     try:
-        data = json.loads(SESSION_STATE_PATH.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
-        return {"bytes_sent": 0, "bytes_received": 0, "chunks": 0, "alerts": 0}
-    return data if isinstance(data, dict) else {"bytes_sent": 0, "bytes_received": 0, "chunks": 0, "alerts": 0}
+        return _default_state()
+    return data if isinstance(data, dict) else _default_state()
 
 
-def _save_session_state(state: dict[str, Any]) -> None:
-    SESSION_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    SESSION_STATE_PATH.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
+def _save_session_state(state: dict[str, Any], base_dir: Path | None) -> None:
+    path = _securelink_root(base_dir) / "session.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
 
 
-def _update_state(stats: TransferStats, direction: str) -> None:
-    state = _load_session_state()
+def _update_state(stats: TransferStats, direction: str, base_dir: Path | None) -> None:
+    state = _load_session_state(base_dir)
     if direction == "send":
         state["bytes_sent"] = int(state.get("bytes_sent", 0)) + stats.bytes_transferred
     elif direction == "recv":
         state["bytes_received"] = int(state.get("bytes_received", 0)) + stats.bytes_transferred
     state["chunks"] = int(state.get("chunks", 0)) + stats.chunks
     state["alerts"] = int(state.get("alerts", 0)) + stats.alerts
-    _save_session_state(state)
+    _save_session_state(state, base_dir)
 
 
 def _prompt_trust(fingerprint: str) -> bool:
@@ -48,6 +59,7 @@ def _prompt_trust(fingerprint: str) -> bool:
 
 
 def _cmd_send(args: argparse.Namespace) -> int:
+    base_dir = _base_dir(args)
     if args.wan:
         config = TransportConfig(
             mode="wan",
@@ -57,7 +69,7 @@ def _cmd_send(args: argparse.Namespace) -> int:
             vlan_id=args.vlan,
         )
         stats = udp_send_file(
-            args.file, args.peer, args.port, config=config, trust_prompt=_prompt_trust
+            args.file, args.peer, args.port, config=config, trust_prompt=_prompt_trust, base_dir=base_dir
         )
     else:
         mode = auto_select_transport_mode(vlan_id=args.vlan, peer_address=args.peer)
@@ -68,13 +80,14 @@ def _cmd_send(args: argparse.Namespace) -> int:
             allow_unknown=args.allow_unknown,
             vlan_id=args.vlan,
         )
-        stats = send_file(args.file, args.peer, config=config, trust_prompt=_prompt_trust)
-    _update_state(stats, "send")
+        stats = send_file(args.file, args.peer, config=config, trust_prompt=_prompt_trust, base_dir=base_dir)
+    _update_state(stats, "send", base_dir)
     print(json.dumps({"status": "sent", "bytes": stats.bytes_transferred, "chunks": stats.chunks}, indent=2))
     return 0
 
 
 def _cmd_recv(args: argparse.Namespace) -> int:
+    base_dir = _base_dir(args)
     mode = "wan" if args.wan else ("vlan" if args.vlan is not None else "lan")
     config = TransportConfig(
         mode=mode,
@@ -86,10 +99,10 @@ def _cmd_recv(args: argparse.Namespace) -> int:
         vlan_id=args.vlan,
     )
     if args.wan:
-        output_path, stats = udp_receive_file(config=config, trust_prompt=_prompt_trust)
+        output_path, stats = udp_receive_file(config=config, trust_prompt=_prompt_trust, base_dir=base_dir)
     else:
-        output_path, stats = receive_file(config=config, trust_prompt=_prompt_trust)
-    _update_state(stats, "recv")
+        output_path, stats = receive_file(config=config, trust_prompt=_prompt_trust, base_dir=base_dir)
+    _update_state(stats, "recv", base_dir)
     print(json.dumps({"status": "received", "path": str(output_path), "bytes": stats.bytes_transferred, "chunks": stats.chunks}, indent=2))
     return 0
 
@@ -119,7 +132,7 @@ def _read_log_lines(path: Path, alerts_only: bool) -> list[str]:
 
 
 def _cmd_logs(args: argparse.Namespace) -> int:
-    log_path = LOG_DIR / f"{date.today().isoformat()}.json"
+    log_path = _securelink_root(_base_dir(args)) / "logs" / f"{date.today().isoformat()}.json"
     lines = _read_log_lines(log_path, alerts_only=args.alerts_only)
     if args.tail and len(lines) > args.tail:
         lines = lines[-args.tail :]
@@ -128,8 +141,8 @@ def _cmd_logs(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_status(_args: argparse.Namespace) -> int:
-    state = _load_session_state()
+def _cmd_status(args: argparse.Namespace) -> int:
+    state = _load_session_state(_base_dir(args))
     print(json.dumps(state, indent=2, sort_keys=True))
     return 0
 
@@ -148,7 +161,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="securelink")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    send_parser = subparsers.add_parser("send", help="send a file to a peer")
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument(
+        "--state-dir",
+        default=None,
+        help="base directory for identity, known_hosts, session state, and logs (default: ~)",
+    )
+
+    send_parser = subparsers.add_parser("send", help="send a file to a peer", parents=[common])
     send_parser.add_argument("file", help="file to transfer")
     send_parser.add_argument("peer", help="peer host or IP")
     send_parser.add_argument("--vlan", type=int, default=None)
@@ -158,7 +178,7 @@ def build_parser() -> argparse.ArgumentParser:
     send_parser.add_argument("--allow-unknown", action="store_true")
     send_parser.set_defaults(func=_cmd_send)
 
-    recv_parser = subparsers.add_parser("recv", help="receive a file")
+    recv_parser = subparsers.add_parser("recv", help="receive a file", parents=[common])
     recv_parser.add_argument("--port", type=int, default=55000)
     recv_parser.add_argument("--allowlist", nargs="*", default=[])
     recv_parser.add_argument("--output-dir", default=str(Path.cwd()))
@@ -168,19 +188,19 @@ def build_parser() -> argparse.ArgumentParser:
     recv_parser.add_argument("--wan", action="store_true", help="use reliable UDP (WAN) transport")
     recv_parser.set_defaults(func=_cmd_recv)
 
-    scan_parser = subparsers.add_parser("scan", help="discover peers on LAN")
+    scan_parser = subparsers.add_parser("scan", help="discover peers on LAN", parents=[common])
     scan_parser.add_argument("--timeout", type=float, default=2.5)
     scan_parser.set_defaults(func=_cmd_scan)
 
-    logs_parser = subparsers.add_parser("logs", help="view structured logs")
+    logs_parser = subparsers.add_parser("logs", help="view structured logs", parents=[common])
     logs_parser.add_argument("--tail", type=int, default=20)
     logs_parser.add_argument("--alerts-only", action="store_true")
     logs_parser.set_defaults(func=_cmd_logs)
 
-    status_parser = subparsers.add_parser("status", help="show session stats")
+    status_parser = subparsers.add_parser("status", help="show session stats", parents=[common])
     status_parser.set_defaults(func=_cmd_status)
 
-    stun_parser = subparsers.add_parser("stun", help="discover this host's public endpoint via STUN")
+    stun_parser = subparsers.add_parser("stun", help="discover this host's public endpoint via STUN", parents=[common])
     stun_parser.add_argument("--stun-host", default="stun.l.google.com")
     stun_parser.add_argument("--stun-port", type=int, default=19302)
     stun_parser.set_defaults(func=_cmd_stun)

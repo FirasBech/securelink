@@ -149,6 +149,10 @@ python -m ui.cli recv --port 55000 --output-dir ./inbox --allowlist 192.168.1.0/
 # Discover this host's public IP:port via STUN
 python -m ui.cli stun --stun-host stun.l.google.com --stun-port 19302
 
+# Isolate identity/known_hosts/session/logs under a chosen directory
+python -m ui.cli --help  # --state-dir is available on every subcommand
+python -m ui.cli status --state-dir ./demo-state
+
 # Scan for peers on LAN
 python -m ui.cli scan
 

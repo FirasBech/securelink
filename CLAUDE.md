@@ -18,7 +18,7 @@ but the code is OS-agnostic.
 ```bash
 pip install -r requirements.txt
 
-pytest tests/ -q              # full suite — currently 25 tests
+pytest tests/ -q              # full suite — currently 27 tests
 python -m core.crypto         # crypto self-test
 python -m core.capsule        # capsule self-test
 python -m ui.cli send <file> <peer>   # CLI entrypoint
@@ -26,7 +26,9 @@ python -m ui.dashboard        # PyQt5 GUI
 ```
 
 Per-user state lives under `~/.securelink/`: `identity_ed25519.pem`,
-`known_hosts.json`, `session.json`, and `logs/<date>.json`.
+`known_hosts.json`, `session.json`, and `logs/<date>.json`. The CLI's
+`--state-dir` flag (on every subcommand) redirects that root to a chosen
+directory — used by `tests/test_cli.py` to keep tests out of the real home.
 
 ## Architecture
 
