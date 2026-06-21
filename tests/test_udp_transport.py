@@ -105,6 +105,48 @@ def test_karn_excludes_retransmitted_frames_from_rtt() -> None:
         sock.close()
 
 
+def test_slow_start_grows_window_per_ack() -> None:
+    sock, channel = _local_channel()
+    try:
+        channel._ssthresh = 100.0  # stay in slow start
+        assert channel._cwnd == 1.0
+        for seq in range(3):
+            channel._unacked[seq] = [_HEADER.pack(_TYPE_DATA, seq) + b"x", time.monotonic(), False]
+            channel._next_seq = seq + 1
+            channel._handle_datagram(_HEADER.pack(_TYPE_ACK, seq))
+        assert channel._cwnd == 4.0  # 1 + one per ack
+    finally:
+        sock.close()
+
+
+def test_congestion_avoidance_grows_window_sublinearly() -> None:
+    sock, channel = _local_channel()
+    try:
+        channel._cwnd = 4.0
+        channel._ssthresh = 4.0  # cwnd >= ssthresh -> congestion avoidance
+        channel._unacked[0] = [_HEADER.pack(_TYPE_DATA, 0) + b"x", time.monotonic(), False]
+        channel._next_seq = 1
+        channel._handle_datagram(_HEADER.pack(_TYPE_ACK, 0))
+        assert abs(channel._cwnd - 4.25) < 1e-9  # +1/cwnd, not +1
+    finally:
+        sock.close()
+
+
+def test_loss_event_halves_window() -> None:
+    sock, channel = _local_channel()
+    try:
+        channel._cwnd = 8.0
+        channel._ssthresh = 100.0
+        # An overdue, unacked frame forces a retransmit (loss event).
+        channel._unacked[0] = [_HEADER.pack(_TYPE_DATA, 0) + b"x", time.monotonic() - 10.0, False]
+        channel._next_seq = 1
+        channel._retransmit_overdue()
+        assert channel._cwnd == 4.0  # halved, not collapsed to 1
+        assert channel._ssthresh == 4.0
+    finally:
+        sock.close()
+
+
 def test_wan_chunk_size_fits_under_mtu() -> None:
     # capsule prefix (52) + tag (16) + reliable header (5) + IP/UDP (28)
     assert wan_chunk_size(1200) == 1200 - 28 - 5 - 52 - 16

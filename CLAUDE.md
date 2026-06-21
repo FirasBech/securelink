@@ -100,9 +100,9 @@ ciphertext   N bytes   AES-256-GCM, 16-byte tag appended
 
 ## Known gaps (do not assume these work)
 
-- **WAN reliability is selective-repeat** — windowed, loss-tested, with an
-  RTT-adaptive RTO (RFC 6298). Still no congestion control: the window is a fixed
-  size rather than AIMD, which is the efficiency follow-up.
+- **WAN reliability is selective-repeat** — loss-tested, with an RTT-adaptive RTO
+  (RFC 6298) and an AIMD congestion window with slow start. Loss recovery is
+  timeout-driven; SACK-based fast-retransmit is the refinement.
 - **NAT hole punching is not coordinated.** STUN discovers each peer's public
   endpoint, but exchanging those endpoints and the simultaneous-open punch is
   still manual/out-of-band; no TURN-style relay is bundled.

@@ -7,11 +7,12 @@ streaming code (``core.transport.stream_send`` / ``stream_receive``) can run ove
 it unchanged via the shared :class:`~core.transport.FrameChannel` interface.
 
 Each datagram is ``type(1) | seq(4) | payload`` where type is DATA or ACK. The
-sender keeps a sliding window of up to ``window`` unacked frames in flight, ACKs
-are *per-frame* (selective), and on timeout only the individual frames that are
-still unacked and overdue are retransmitted — not the whole window. The
-retransmit timeout adapts to measured RTT (RFC 6298 RTO estimation with Karn's
-algorithm and exponential backoff). The receiver
+sender keeps a congestion window of unacked frames in flight (AIMD with slow
+start, capped by the receiver window ``window``), ACKs are *per-frame*
+(selective), and on timeout only the individual frames that are still unacked and
+overdue are retransmitted — not the whole window. The retransmit timeout adapts
+to measured RTT (RFC 6298 RTO estimation with Karn's algorithm and exponential
+backoff), and a loss event halves the slow-start threshold. The receiver
 buffers out-of-order frames within its window and delivers them in order once the
 gaps fill. ``flush`` drains the window before close and ``linger`` re-services
 retransmissions afterwards, so a dropped final ACK is still recovered. Every pump
@@ -109,6 +110,13 @@ class ReliableUdpChannel:
         self._acked: set[int] = set()
         self._retries = 0
 
+        # Congestion control (AIMD with slow start). The send window is the
+        # congestion window cwnd (in frames), capped by the receiver window
+        # ``self._window``. cwnd grows exponentially until ssthresh, then
+        # linearly; a loss (retransmit timeout) halves ssthresh and resets cwnd.
+        self._cwnd = 1.0
+        self._ssthresh = float(self._window)
+
         # Receive side: out-of-order frames are buffered until the gap fills.
         self._recv_seq = 0
         self._recv_buffer: dict[int, bytes] = {}
@@ -135,6 +143,26 @@ class ReliableUdpChannel:
         except OSError:
             pass
 
+    def _grow_cwnd(self) -> None:
+        """Open the congestion window on a successful ACK (slow start / AIMD)."""
+
+        if self._cwnd < self._ssthresh:
+            self._cwnd += 1.0  # slow start: exponential growth per RTT
+        else:
+            self._cwnd += 1.0 / self._cwnd  # congestion avoidance: +1 per RTT
+        self._cwnd = min(self._cwnd, float(self._window))
+
+    def _shrink_cwnd(self) -> None:
+        """Multiplicative decrease on a loss event: halve the window.
+
+        A full Tahoe reset to 1 collapses throughput under random (non-congestion)
+        loss, so this halves cwnd with a small floor instead — closer to Reno's
+        multiplicative decrease and far more usable on a lossy link.
+        """
+
+        self._cwnd = max(2.0, self._cwnd / 2.0)
+        self._ssthresh = self._cwnd
+
     def _update_rto(self, rtt: float) -> None:
         """Fold a fresh RTT sample into the smoothed RTO (RFC 6298)."""
 
@@ -159,6 +187,7 @@ class ReliableUdpChannel:
                 # Karn's algorithm: only sample RTT from frames never retransmitted.
                 if not entry[2]:
                     self._update_rto(time.monotonic() - entry[1])
+                self._grow_cwnd()
                 self._acked.add(seq)
                 self._retries = 0
                 while self._send_base in self._acked:
@@ -194,8 +223,9 @@ class ReliableUdpChannel:
                 entry[2] = True  # exclude from RTT sampling (Karn's algorithm)
                 retransmitted_any = True
         if retransmitted_any:
-            # Back off until a fresh, valid RTT sample recomputes the RTO.
+            # Loss event: back off the RTO and the congestion window.
             self._rto = min(self._max_rto, self._rto * 2)
+            self._shrink_cwnd()
 
     def _pump(self, *, block: bool) -> None:
         """Process one (blocking) or all immediately-available datagrams.
@@ -230,7 +260,8 @@ class ReliableUdpChannel:
     def send_frame(self, payload: bytes) -> None:
         if self._peer_addr is None:
             raise TransportError("reliable UDP send before peer address is known")
-        while (self._next_seq - self._send_base) >= self._window:
+        # The number of frames in flight is bounded by the congestion window.
+        while (self._next_seq - self._send_base) >= max(1, int(self._cwnd)):
             self._pump(block=True)
         seq = self._next_seq
         datagram = _HEADER.pack(_TYPE_DATA, seq) + payload
