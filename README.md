@@ -1,0 +1,215 @@
+# SecureLink
+
+SecureLink is a security-focused Python file transfer tool for LAN, WAN, and enterprise VLAN environments. It demonstrates authenticated encryption, session identity, packet inspection, and audit logging for cross-network file transfer.
+
+LAN and VLAN use direct TCP transfer. WAN uses a reliable-UDP transport (Go-Back-N windowed ARQ over UDP) with a built-in RFC 8489 STUN client for public-endpoint discovery. NAT hole-punch coordination (out-of-band signaling) and a TURN-style relay are not yet bundled; see Known Limitations.
+
+## What It Does
+
+| Mode | Transport | Discovery / Control |
+| --- | --- | --- |
+| LAN | Direct TCP, jumbo-frame-aware chunking | mDNS peer discovery |
+| WAN | Reliable UDP (Go-Back-N windowed ARQ) + STUN endpoint discovery | Manual peer entry |
+| VLAN | TCP transfer with VLAN policy checks | Per-VLAN ACL metadata |
+
+## Security Features
+
+| Feature | Implementation |
+| --- | --- |
+| End-to-end encryption | AES-256-GCM per chunk |
+| Key exchange | X25519 ephemeral Diffie-Hellman + HKDF-SHA256 |
+| Capsule integrity | HMAC-SHA256 over header + nonce + ciphertext |
+| Replay prevention | Per-session sequence tracker with sliding window |
+| Device identity | Ed25519 keypair, Trust-On-First-Use (TOFU) |
+| VLAN enforcement | 802.1Q policy validation and per-VLAN ACLs |
+| MITM detection | ARP spoof monitoring + TTL anomaly alerts |
+| Audit logging | Structured JSON logs under `~/.securelink/logs/` |
+
+## Project Status
+
+SecureLink is currently implemented as a working file transfer prototype with a PyQt5 dashboard, CLI entrypoint, and verified transport coverage for LAN, VLAN, and WAN (reliable-UDP) loopback paths.
+
+Verified in this workspace:
+
+- Core crypto, capsule, auth, discovery, STUN, transport, UDP transport, guard, and UI modules are in place.
+- LAN, VLAN, and WAN (reliable-UDP) loopback tests pass, and the STUN codec is unit-tested.
+- The dashboard launches with `python -m ui.dashboard`.
+- The full test suite is green at 22 passed.
+
+Current caveats:
+
+- WAN reliability is stop-and-wait ARQ (correct but modest throughput); a windowed ARQ is future work.
+- NAT hole-punch coordination needs an out-of-band signaling exchange, and no TURN-style relay is bundled.
+- VLAN support is policy enforcement and metadata, not 802.1Q tagged frame generation.
+
+## Architecture
+
+```mermaid
+flowchart LR
+  UI[CLI / PyQt5 Dashboard] --> CFG[TransportConfig]
+  UI --> DISC[Discovery]
+  DISC --> MODE{Transport mode}
+  MODE --> LAN[LAN TCP]
+  MODE --> WAN[WAN UDP + STUN]
+  MODE --> VLAN[VLAN policy + metadata]
+  LAN --> AUTH[Identity + handshake]
+  WAN --> AUTH
+  VLAN --> AUTH
+  AUTH --> CRYPTO[Capsule: X25519, AES-GCM, HMAC, sequence]
+  CRYPTO --> IO[File read / write]
+  CRYPTO --> LOG[JSON logs + security guards]
+```
+
+## Capsule Wire Format
+
+```text
+┌──────────────────────────────────────────────────────────────┐
+│  GRE Header       8 bytes   flags · protocol · chunk_id      │
+├──────────────────────────────────────────────────────────────┤
+│  HMAC-SHA256     32 bytes   over (header + nonce + cipher)   │
+├──────────────────────────────────────────────────────────────┤
+│  AES-GCM nonce   12 bytes   random per chunk                 │
+├──────────────────────────────────────────────────────────────┤
+│  Ciphertext       N bytes   AES-256-GCM, 16-byte tag appended│
+└──────────────────────────────────────────────────────────────┘
+```
+
+The capsule has a 52-byte fixed prefix, and the AES-GCM authentication tag is appended to the ciphertext.
+
+## Project Structure
+
+```text
+securelink/
+├── core/
+│   ├── crypto.py        X25519 key exchange, AES-256-GCM, HMAC helpers
+│   ├── capsule.py       GRE capsule format, sequence tracking, MTU helpers
+│   ├── auth.py          Ed25519 identity, TOFU, known_hosts
+│   ├── discovery.py     mDNS announce + scan
+│   ├── stun.py          RFC 8489 STUN client (public-endpoint discovery)
+│   ├── transport.py     TCP transfer + shared channel/handshake/streaming
+│   └── udp_transport.py Reliable-UDP (WAN) transport, stop-and-wait ARQ
+├── security/
+│   ├── capture.py       Scapy packet capture, JSON event logging
+│   ├── arp_guard.py     ARP table baseline + spoof detection
+│   ├── ttl_guard.py     TTL recording + anomaly alerting
+│   └── vlan_guard.py    802.1Q policy validation, per-VLAN ACL engine
+├── ui/
+│   ├── cli.py           CLI entrypoint (argparse)
+│   └── dashboard.py     PyQt5 GUI dashboard
+├── config/
+│   └── vlan_policy.json Per-VLAN ACL rules
+├── tests/
+│   ├── test_crypto_capsule.py
+│   ├── test_transport_modes.py
+│   ├── test_udp_transport.py
+│   ├── test_stun.py
+│   ├── test_identity.py
+│   ├── test_guards.py
+│   └── test_dashboard.py
+├── requirements.txt
+└── README.md
+```
+
+## Install
+
+```bash
+pip install -r requirements.txt
+```
+
+## Usage
+
+### CLI
+
+The command line entrypoint is `python -m ui.cli`.
+
+Examples:
+
+```bash
+# Send a file over LAN
+python -m ui.cli send sample.bin 192.168.1.10
+
+# Send over a VLAN-scoped path
+python -m ui.cli send sample.bin 192.168.1.50 --vlan 30
+
+# Send over WAN (reliable UDP)
+python -m ui.cli send sample.bin 203.0.113.10 --wan --port 55000
+
+# Send to an unknown peer without an interactive trust prompt
+python -m ui.cli send sample.bin 192.168.1.10 --allow-unknown
+
+# Receive a file
+python -m ui.cli recv --port 55000
+
+# Receive over WAN (reliable UDP)
+python -m ui.cli recv --wan --port 55000
+
+# Receive into a directory, restricted to an allowlist
+python -m ui.cli recv --port 55000 --output-dir ./inbox --allowlist 192.168.1.0/24
+
+# Discover this host's public IP:port via STUN
+python -m ui.cli stun --stun-host stun.l.google.com --stun-port 19302
+
+# Scan for peers on LAN
+python -m ui.cli scan
+
+# View security logs
+python -m ui.cli logs --alerts-only
+
+# Show session stats
+python -m ui.cli status
+```
+
+### Dashboard
+
+```bash
+python -m ui.dashboard
+```
+
+## VLAN Policy
+
+Edit `config/vlan_policy.json` to define inter-VLAN transfer rules.
+
+Example:
+
+```json
+{
+  "10": [10, 20],
+  "20": [20],
+  "30": [10, 30]
+}
+```
+
+This file is loaded as a simple source-VLAN to allowed-destination map. Policy is deny-by-default. VLAN support in SecureLink is policy enforcement and metadata, not tagged frame generation.
+
+## Running Tests
+
+```bash
+pytest tests/ -v
+```
+
+Current status: **25 passed**
+
+| Test file | Coverage |
+| --- | --- |
+| `test_crypto_capsule.py` | X25519 exchange, AES-GCM round-trip, HMAC tamper, replay |
+| `test_transport_modes.py` | LAN/VLAN TCP loopback round-trips |
+| `test_udp_transport.py` | WAN loopback round-trip, window ordering/cumulative-ACK, chunk sizing |
+| `test_udp_reliability.py` | WAN transfer through a lossy relay (25% drop both ways) |
+| `test_stun.py` | RFC 8489 message codec, XOR-MAPPED-ADDRESS (IPv4/IPv6), error paths |
+| `test_identity.py` | Ed25519 keygen, persistence, TOFU |
+| `test_guards.py` | ARP spoof, TTL anomaly, VLAN policy |
+| `test_dashboard.py` | PyQt5 dashboard smoke test |
+
+## Known Limitations
+
+- WAN reliability is Go-Back-N windowed ARQ (up to 32 frames in flight) with cumulative ACKs, retransmission, duplicate detection, and a graceful-close linger that recovers a dropped final ACK. It is verified against 25% bidirectional packet loss. A selective-repeat ARQ (retransmitting only the missing frame rather than the whole window) would be more efficient under heavy loss and is the natural next step.
+- The STUN client discovers a host's public endpoint, but the two peers still need an out-of-band channel to exchange those endpoints, and the simultaneous-open hole punch is not yet coordinated automatically. No TURN-style relay is bundled.
+- VLAN mode validates policy and metadata, not L2 802.1Q tagged frame generation.
+
+## Skills Demonstrated
+
+`Python` `TCP/IP` `AES-256-GCM` `X25519` `HMAC-SHA256` `GRE encapsulation`
+
+`STUN RFC 8489` `UDP hole punching` `NAT traversal` `802.1Q VLAN`
+
+`Scapy` `ARP monitoring` `mDNS` `Ed25519` `TOFU` `JSON audit logging`
