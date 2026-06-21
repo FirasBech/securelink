@@ -187,19 +187,6 @@ This file is loaded as a simple source-VLAN to allowed-destination map. Policy i
 pytest tests/ -v
 ```
 
-Current status: **25 passed**
-
-| Test file | Coverage |
-| --- | --- |
-| `test_crypto_capsule.py` | X25519 exchange, AES-GCM round-trip, HMAC tamper, replay |
-| `test_transport_modes.py` | LAN/VLAN TCP loopback round-trips |
-| `test_udp_transport.py` | WAN loopback round-trip, window ordering/cumulative-ACK, chunk sizing |
-| `test_udp_reliability.py` | WAN transfer through a lossy relay (25% drop both ways) |
-| `test_stun.py` | RFC 8489 message codec, XOR-MAPPED-ADDRESS (IPv4/IPv6), error paths |
-| `test_identity.py` | Ed25519 keygen, persistence, TOFU |
-| `test_guards.py` | ARP spoof, TTL anomaly, VLAN policy |
-| `test_dashboard.py` | PyQt5 dashboard smoke test |
-
 ## Known Limitations
 
 - WAN reliability is Go-Back-N windowed ARQ (up to 32 frames in flight) with cumulative ACKs, retransmission, duplicate detection, and a graceful-close linger that recovers a dropped final ACK. It is verified against 25% bidirectional packet loss. A selective-repeat ARQ (retransmitting only the missing frame rather than the whole window) would be more efficient under heavy loss and is the natural next step.
