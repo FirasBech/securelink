@@ -8,12 +8,13 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QColor, QFont, QIcon
+from PyQt5.QtCore import Qt, QTimer, QUrl, pyqtSignal
+from PyQt5.QtGui import QColor, QDesktopServices, QFont, QIcon
 from PyQt5.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QDialog,
     QFileDialog,
     QFrame,
     QGridLayout,
@@ -30,6 +31,7 @@ from PyQt5.QtWidgets import (
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
+    QTextBrowser,
     QVBoxLayout,
     QWidget,
 )
@@ -130,6 +132,7 @@ class DashboardWindow(QMainWindow):
         icon_path = Path(__file__).resolve().parents[1] / "assets" / "securelink.ico"
         if icon_path.exists():
             self.setWindowIcon(QIcon(str(icon_path)))
+        self._build_menu()
         self.resize(1480, 920)
         self.setMinimumSize(1240, 780)
         self._apply_styles()
@@ -193,6 +196,53 @@ class DashboardWindow(QMainWindow):
         root_layout.addWidget(splitter)
 
         self.statusBar().showMessage("Ready")
+
+    def _build_menu(self) -> None:
+        help_menu = self.menuBar().addMenu("&Help")
+        help_menu.addAction("User &Manual", lambda: self._show_doc("User Manual", "docs/MANUAL.md"))
+        help_menu.addAction("&FAQ", lambda: self._show_doc("FAQ", "docs/FAQ.md"))
+        help_menu.addSeparator()
+        help_menu.addAction(
+            "View on &GitHub",
+            lambda: QDesktopServices.openUrl(QUrl("https://github.com/FirasBech/securelink")),
+        )
+        help_menu.addAction("&About SecureLink", self._show_about)
+
+    def _show_doc(self, title: str, relative_path: str) -> None:
+        path = Path(__file__).resolve().parents[1] / relative_path
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            text = f"# {title}\n\nCould not open `{relative_path}`."
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"SecureLink — {title}")
+        dialog.resize(860, 680)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(0, 0, 0, 0)
+        browser = QTextBrowser(dialog)
+        browser.setOpenExternalLinks(True)
+        # Render as a clean light "page" regardless of the dark app theme.
+        browser.setStyleSheet(
+            "QTextBrowser { background: #ffffff; color: #1f2937; padding: 18px; }"
+        )
+        try:
+            browser.setMarkdown(text)
+        except AttributeError:  # Qt < 5.14 has no markdown renderer
+            browser.setPlainText(text)
+        layout.addWidget(browser)
+        dialog.exec_()
+
+    def _show_about(self) -> None:
+        QMessageBox.about(
+            self,
+            "About SecureLink",
+            "<b>SecureLink</b><br>"
+            "Authenticated, encrypted file transfer for LAN, VLAN, and WAN.<br><br>"
+            "AES-256-GCM · X25519 · Ed25519 / TOFU · reliable-UDP WAN transport.<br>"
+            "A portfolio prototype — see the User Manual and FAQ under Help.<br><br>"
+            '<a href="https://github.com/FirasBech/securelink">github.com/FirasBech/securelink</a>',
+        )
 
     def _apply_styles(self) -> None:
         self.setStyleSheet(
@@ -310,6 +360,25 @@ class DashboardWindow(QMainWindow):
             }
             QStatusBar {
                 color: #94a3b8;
+            }
+            QMenuBar {
+                background: #0f172a;
+                color: #cbd5e1;
+            }
+            QMenuBar::item {
+                padding: 4px 10px;
+                background: transparent;
+            }
+            QMenuBar::item:selected {
+                background: #1e293b;
+            }
+            QMenu {
+                background: #1e293b;
+                color: #e2e8f0;
+                border: 1px solid #334155;
+            }
+            QMenu::item:selected {
+                background: #2563eb;
             }
             QSplitter::handle {
                 background: #334155;

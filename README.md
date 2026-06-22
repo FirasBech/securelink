@@ -6,6 +6,15 @@ LAN and VLAN use direct TCP. WAN uses reliable UDP (selective-repeat windowed AR
 
 **Docs:** [User Manual](docs/MANUAL.md) · [FAQ](docs/FAQ.md)
 
+## Getting started in 60 seconds
+
+1. **Install:** `pip install "cryptography>=42" "scapy>=2.5" "zeroconf>=0.132" "PyQt5>=5.15" "pytest>=8"`
+2. **Launch:** double-click the **SecureLink Dashboard** shortcut, or run `python -m ui.dashboard`.
+3. **Receive (machine B):** in the Receive panel set a port and click **Start Listening** (tick **Allow unknown devices** on first contact).
+4. **Send (machine A):** choose a file, enter machine B's IP and port, click **Send File**.
+
+The manual and FAQ are also in the app under **Help** in the menu bar.
+
 ## What It Does
 
 | Mode | Transport | Discovery / Control |
