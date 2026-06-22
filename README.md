@@ -4,6 +4,8 @@ SecureLink is a Python file-transfer tool for LAN, VLAN, and WAN. Every transfer
 
 LAN and VLAN use direct TCP. WAN uses reliable UDP (selective-repeat windowed ARQ) with an RFC 8489 STUN client, a TCP rendezvous for endpoint signaling, and simultaneous-open UDP hole punching. A TURN-style relay for symmetric NATs is not bundled (see Known Limitations).
 
+**Docs:** [User Manual](docs/MANUAL.md) · [FAQ](docs/FAQ.md)
+
 ## What It Does
 
 | Mode | Transport | Discovery / Control |
@@ -140,6 +142,9 @@ securelink/
 │   └── dashboard.py     PyQt5 GUI dashboard
 ├── config/
 │   └── vlan_policy.json Per-VLAN ACL rules
+├── docs/
+│   ├── MANUAL.md       user manual
+│   └── FAQ.md          common questions
 ├── tests/
 │   ├── test_crypto_capsule.py
 │   ├── test_transport_modes.py
