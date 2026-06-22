@@ -195,45 +195,67 @@ class DashboardWindow(QMainWindow):
         self.setStyleSheet(
             """
             QMainWindow {
-                background: #f4f7fb;
+                background: #0f172a;
+            }
+            QWidget {
+                color: #e2e8f0;
+                font-size: 13px;
             }
             QFrame#HeaderCard {
-                background: #ffffff;
-                border: 1px solid #d7e0ea;
+                background: #1e293b;
+                border: 1px solid #334155;
                 border-radius: 14px;
             }
+            QLabel {
+                color: #cbd5e1;
+            }
             QLabel#HeaderTitle {
-                color: #1f2937;
+                color: #f8fafc;
             }
             QLabel#HeaderSubtitle {
-                color: #5b6470;
+                color: #94a3b8;
             }
             QLabel#StatusLabel {
-                color: #2563eb;
+                color: #38bdf8;
                 font-weight: 600;
             }
+            QLabel#ReceiveStatus, QLabel#LogSummary, QLabel#AlertSummary {
+                color: #94a3b8;
+            }
             QGroupBox {
-                background: #ffffff;
-                border: 1px solid #d7e0ea;
+                background: #1e293b;
+                border: 1px solid #334155;
                 border-radius: 12px;
                 margin-top: 14px;
                 padding: 10px;
                 font-weight: 600;
-                color: #1f2937;
+                color: #e2e8f0;
             }
             QGroupBox::title {
                 subcontrol-origin: margin;
                 left: 12px;
                 padding: 0 6px;
+                color: #cbd5e1;
             }
-            QLineEdit, QComboBox, QSpinBox, QTableWidget {
-                background: #ffffff;
-                border: 1px solid #cbd5e1;
+            QLineEdit, QComboBox, QSpinBox {
+                background: #0f172a;
+                color: #e2e8f0;
+                border: 1px solid #334155;
                 border-radius: 8px;
                 padding: 6px 8px;
+                selection-background-color: #2563eb;
             }
             QLineEdit:focus, QComboBox:focus, QSpinBox:focus {
-                border: 1px solid #2563eb;
+                border: 1px solid #3b82f6;
+            }
+            QComboBox QAbstractItemView {
+                background: #1e293b;
+                color: #e2e8f0;
+                selection-background-color: #2563eb;
+            }
+            QCheckBox {
+                color: #cbd5e1;
+                spacing: 6px;
             }
             QPushButton {
                 background: #2563eb;
@@ -244,33 +266,76 @@ class DashboardWindow(QMainWindow):
                 font-weight: 600;
             }
             QPushButton:hover {
+                background: #3b82f6;
+            }
+            QPushButton:pressed {
                 background: #1d4ed8;
             }
             QPushButton:disabled {
-                background: #93c5fd;
+                background: #334155;
+                color: #64748b;
             }
             QTableWidget {
-                alternate-background-color: #f8fafc;
-                gridline-color: #e2e8f0;
+                background: #1e293b;
+                color: #e2e8f0;
+                border: 1px solid #334155;
+                border-radius: 8px;
+                alternate-background-color: #172033;
+                gridline-color: #334155;
+                selection-background-color: #1d4ed8;
+                selection-color: #ffffff;
             }
             QHeaderView::section {
-                background: #edf2ff;
-                color: #1f2937;
+                background: #111827;
+                color: #cbd5e1;
                 padding: 6px 8px;
                 border: none;
-                border-bottom: 1px solid #d7e0ea;
+                border-bottom: 1px solid #334155;
                 font-weight: 600;
             }
             QProgressBar {
-                border: 1px solid #cbd5e1;
+                border: 1px solid #334155;
                 border-radius: 8px;
-                background: #ffffff;
+                background: #0f172a;
+                color: #e2e8f0;
                 text-align: center;
                 height: 18px;
             }
             QProgressBar::chunk {
                 border-radius: 8px;
-                background: #2563eb;
+                background: #3b82f6;
+            }
+            QStatusBar {
+                color: #94a3b8;
+            }
+            QSplitter::handle {
+                background: #334155;
+            }
+            QScrollBar:vertical {
+                background: #0f172a;
+                width: 12px;
+                margin: 0;
+            }
+            QScrollBar::handle:vertical {
+                background: #334155;
+                border-radius: 6px;
+                min-height: 24px;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0;
+            }
+            QScrollBar:horizontal {
+                background: #0f172a;
+                height: 12px;
+                margin: 0;
+            }
+            QScrollBar::handle:horizontal {
+                background: #334155;
+                border-radius: 6px;
+                min-width: 24px;
+            }
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+                width: 0;
             }
             """
         )
@@ -688,11 +753,11 @@ class DashboardWindow(QMainWindow):
                 item = _table_item(value)
                 item.setToolTip(json.dumps(entry, sort_keys=True))
                 if severity == "HIGH":
-                    item.setBackground(QColor("#fee2e2"))
-                    item.setForeground(QColor("#7f1d1d"))
+                    item.setBackground(QColor("#450a0a"))
+                    item.setForeground(QColor("#fecaca"))
                 elif severity == "MEDIUM":
-                    item.setBackground(QColor("#fef3c7"))
-                    item.setForeground(QColor("#92400e"))
+                    item.setBackground(QColor("#422006"))
+                    item.setForeground(QColor("#fde68a"))
                 self.alert_table.setItem(row, column, item)
         self._resize_table_columns(self.alert_table, stretch_last=True)
 
@@ -733,8 +798,8 @@ class DashboardWindow(QMainWindow):
                 item = _table_item(value)
                 item.setToolTip(json.dumps(entry, sort_keys=True))
                 if alert:
-                    item.setBackground(QColor("#fee2e2"))
-                    item.setForeground(QColor("#7f1d1d"))
+                    item.setBackground(QColor("#450a0a"))
+                    item.setForeground(QColor("#fecaca"))
                 self.log_table.setItem(row, column, item)
 
         self._resize_table_columns(self.log_table, stretch_last=True)
