@@ -114,6 +114,8 @@ class DashboardWindow(QMainWindow):
         super().__init__()
         self._auto_refresh = auto_refresh
         self._peers: list[dict[str, Any]] = []
+        self._all_log_entries: list[dict[str, Any]] = []
+        self._all_alert_entries: list[dict[str, Any]] = []
         self._receive_thread: threading.Thread | None = None
         self._receive_cancel: threading.Event | None = None
         self._build_window()
@@ -523,10 +525,17 @@ class DashboardWindow(QMainWindow):
         header_row = QHBoxLayout()
         self.log_refresh_button = QPushButton("Refresh Logs")
         self.log_refresh_button.clicked.connect(self.refresh_logs)
+        self.log_search_edit = QLineEdit()
+        self.log_search_edit.setPlaceholderText("Filter logs…")
+        self.log_search_edit.setClearButtonEnabled(True)
+        self.log_search_edit.textChanged.connect(self._apply_log_filter)
+        self.log_alerts_only_checkbox = QCheckBox("Alerts only")
+        self.log_alerts_only_checkbox.stateChanged.connect(self._apply_log_filter)
         self.log_summary_label = QLabel("0 events, 0 alerts")
         self.log_summary_label.setObjectName("LogSummary")
         header_row.addWidget(self.log_refresh_button)
-        header_row.addStretch(1)
+        header_row.addWidget(self.log_search_edit, 1)
+        header_row.addWidget(self.log_alerts_only_checkbox)
         header_row.addWidget(self.log_summary_label)
 
         self.log_table = QTableWidget(0, 9)
@@ -658,16 +667,56 @@ class DashboardWindow(QMainWindow):
         self.logs_loaded.emit(entries, alerts)
 
     def _render_logs(self, payload: object, alerts: object) -> None:
-        entries = list(payload) if isinstance(payload, list) else []
-        alert_entries = list(alerts) if isinstance(alerts, list) else []
+        self._all_log_entries = [
+            e for e in (payload if isinstance(payload, list) else []) if isinstance(e, dict)
+        ]
+        self._all_alert_entries = [
+            e for e in (alerts if isinstance(alerts, list) else []) if isinstance(e, dict)
+        ]
 
-        self.log_summary_label.setText(f"{len(entries)} events, {len(alert_entries)} alerts")
-        self.alert_summary_label.setText(f"{len(alert_entries)} active alerts")
+        self.alert_summary_label.setText(f"{len(self._all_alert_entries)} active alerts")
+        self.alert_table.setRowCount(len(self._all_alert_entries))
+        for row, entry in enumerate(self._all_alert_entries):
+            severity = _severity_for_event(entry)
+            values = [
+                severity,
+                str(entry.get("event") or ""),
+                str(entry.get("src_ip") or entry.get("peer_ip") or ""),
+                str(entry.get("message") or ""),
+            ]
+            for column, value in enumerate(values):
+                item = _table_item(value)
+                item.setToolTip(json.dumps(entry, sort_keys=True))
+                if severity == "HIGH":
+                    item.setBackground(QColor("#fee2e2"))
+                    item.setForeground(QColor("#7f1d1d"))
+                elif severity == "MEDIUM":
+                    item.setBackground(QColor("#fef3c7"))
+                    item.setForeground(QColor("#92400e"))
+                self.alert_table.setItem(row, column, item)
+        self._resize_table_columns(self.alert_table, stretch_last=True)
+
+        self._apply_log_filter()
+
+    def _apply_log_filter(self) -> None:
+        query = self.log_search_edit.text().strip().lower()
+        alerts_only = self.log_alerts_only_checkbox.isChecked()
+
+        def _matches(entry: dict[str, Any]) -> bool:
+            if alerts_only and not entry.get("alert"):
+                return False
+            if not query:
+                return True
+            return query in " ".join(str(v) for v in entry.values()).lower()
+
+        entries = [entry for entry in self._all_log_entries if _matches(entry)]
+        self.log_summary_label.setText(
+            f"{len(entries)} / {len(self._all_log_entries)} events, "
+            f"{len(self._all_alert_entries)} alerts"
+        )
 
         self.log_table.setRowCount(len(entries))
         for row, entry in enumerate(entries):
-            if not isinstance(entry, dict):
-                continue
             values = [
                 str(entry.get("timestamp") or ""),
                 str(entry.get("event") or ""),
@@ -688,35 +737,20 @@ class DashboardWindow(QMainWindow):
                     item.setForeground(QColor("#7f1d1d"))
                 self.log_table.setItem(row, column, item)
 
-        self.alert_table.setRowCount(len(alert_entries))
-        for row, entry in enumerate(alert_entries):
-            if not isinstance(entry, dict):
-                continue
-            severity = _severity_for_event(entry)
-            values = [
-                severity,
-                str(entry.get("event") or ""),
-                str(entry.get("src_ip") or entry.get("peer_ip") or ""),
-                str(entry.get("message") or ""),
-            ]
-            for column, value in enumerate(values):
-                item = _table_item(value)
-                item.setToolTip(json.dumps(entry, sort_keys=True))
-                if severity == "HIGH":
-                    item.setBackground(QColor("#fee2e2"))
-                    item.setForeground(QColor("#7f1d1d"))
-                elif severity == "MEDIUM":
-                    item.setBackground(QColor("#fef3c7"))
-                    item.setForeground(QColor("#92400e"))
-                self.alert_table.setItem(row, column, item)
-
         self._resize_table_columns(self.log_table, stretch_last=True)
-        self._resize_table_columns(self.alert_table, stretch_last=True)
+
+    def _reject_send(self, message: str) -> None:
+        self.transfer_detail_label.setText(message)
+        self.status_changed.emit(message)
+        QMessageBox.warning(self, "SecureLink", message)
 
     def send_selected_file(self) -> None:
         file_path = self.file_edit.text().strip()
         if not file_path:
-            QMessageBox.warning(self, "SecureLink", "Choose a file before sending.")
+            self._reject_send("Choose a file before sending.")
+            return
+        if not Path(file_path).is_file():
+            self._reject_send(f"File not found: {file_path}")
             return
 
         peer_host = self.peer_host_edit.text().strip()
@@ -728,7 +762,7 @@ class DashboardWindow(QMainWindow):
                     self.peer_port_spin.setValue(int(peer.get("port")))
 
         if not peer_host:
-            QMessageBox.warning(self, "SecureLink", "Choose or enter a peer host before sending.")
+            self._reject_send("Choose or enter a peer host before sending.")
             return
 
         vlan_id = self.vlan_spin.value() or None

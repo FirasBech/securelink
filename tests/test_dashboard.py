@@ -19,6 +19,21 @@ def test_dashboard_window_initializes_offscreen() -> None:
     assert window.recv_port_spin.value() == 55000
     assert "WAN" in window.recv_wan_checkbox.text()
 
+    # Log search and alerts-only filtering.
+    window._render_logs(
+        [
+            {"event": "transfer", "alert": False, "message": "ok"},
+            {"event": "arp_spoof", "alert": True, "message": "arp changed"},
+        ],
+        [{"event": "arp_spoof", "alert": True, "message": "arp changed"}],
+    )
+    assert window.log_table.rowCount() == 2
+    window.log_search_edit.setText("arp")
+    assert window.log_table.rowCount() == 1
+    window.log_search_edit.setText("")
+    window.log_alerts_only_checkbox.setChecked(True)
+    assert window.log_table.rowCount() == 1
+
     window.close()
     window.deleteLater()
 
