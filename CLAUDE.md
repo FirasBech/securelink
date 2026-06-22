@@ -61,6 +61,11 @@ Three layers, strict one-directional dependency: `ui` → `core` + `security`.
   by `tests/test_udp_reliability.py`; touch that test if you change the ARQ.
 - **stun.py** — RFC 8489 STUN client. The message codec is pure/offline-testable;
   only `discover_public_endpoint` touches the network.
+- **nat.py** — WAN NAT traversal coordination: a `RendezvousServer` (TCP
+  matchmaker that swaps two peers' endpoints by token), `udp_hole_punch`
+  (simultaneous open), and `wan_connect` (STUN + rendezvous + punch → a socket
+  ready for `ReliableUdpChannel`). Probe bytes 0x02/0x03 stay clear of the
+  transport's 0x00/0x01.
 - **discovery.py** — mDNS announce/scan (zeroconf). `auto_select_transport_mode`
   returns `"vlan"` if a vlan_id is set, else `"lan"`.
 
@@ -103,9 +108,9 @@ ciphertext   N bytes   AES-256-GCM, 16-byte tag appended
 - **WAN reliability is selective-repeat** — loss-tested, with an RTT-adaptive RTO
   (RFC 6298) and an AIMD congestion window with slow start. Loss recovery is
   timeout-driven; SACK-based fast-retransmit is the refinement.
-- **NAT hole punching is not coordinated.** STUN discovers each peer's public
-  endpoint, but exchanging those endpoints and the simultaneous-open punch is
-  still manual/out-of-band; no TURN-style relay is bundled.
+- **NAT traversal is coordinated but unproven on real NATs.** `core/nat.py` does
+  STUN + rendezvous + hole punch, verified on loopback only. No TURN-style relay
+  fallback for symmetric NATs is bundled.
 - **VLAN** is policy enforcement + metadata only — no 802.1Q tagged-frame
   generation.
 - `core/__init__.py`, `security/__init__.py`, `ui/__init__.py` are package

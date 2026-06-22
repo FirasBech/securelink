@@ -2,7 +2,7 @@
 
 SecureLink is a security-focused Python file transfer tool for LAN, WAN, and enterprise VLAN environments. It demonstrates authenticated encryption, session identity, packet inspection, and audit logging for cross-network file transfer.
 
-LAN and VLAN use direct TCP transfer. WAN uses a reliable-UDP transport (selective-repeat windowed ARQ over UDP) with a built-in RFC 8489 STUN client for public-endpoint discovery. NAT hole-punch coordination (out-of-band signaling) and a TURN-style relay are not yet bundled; see Known Limitations.
+LAN and VLAN use direct TCP transfer. WAN uses a reliable-UDP transport (selective-repeat windowed ARQ over UDP) with a built-in RFC 8489 STUN client, a TCP rendezvous for endpoint signaling, and simultaneous-open UDP hole punching. A TURN-style relay fallback (for symmetric NATs) is not bundled; see Known Limitations.
 
 ## What It Does
 
@@ -87,7 +87,8 @@ securelink/
 │   ├── discovery.py     mDNS announce + scan
 │   ├── stun.py          RFC 8489 STUN client (public-endpoint discovery)
 │   ├── transport.py     TCP transfer + shared channel/handshake/streaming
-│   └── udp_transport.py Reliable-UDP (WAN) transport, selective-repeat ARQ
+│   ├── udp_transport.py Reliable-UDP (WAN) transport, selective-repeat ARQ
+│   └── nat.py           STUN rendezvous + UDP hole punching (wan_connect)
 ├── security/
 │   ├── capture.py       Scapy packet capture, JSON event logging
 │   ├── arp_guard.py     ARP table baseline + spoof detection
@@ -194,7 +195,7 @@ pytest tests/ -v
 ## Known Limitations
 
 - WAN reliability is selective-repeat windowed ARQ (up to 32 frames in flight): per-frame ACKs, out-of-order receive buffering, retransmission of only the overdue frames, and a graceful-close linger that recovers a dropped final ACK. It is verified against 25% bidirectional packet loss. The retransmit timeout adapts to measured RTT (RFC 6298, with Karn's algorithm and exponential backoff), and the send window is an AIMD congestion window with slow start (halving on loss). Loss recovery is timeout-driven; a SACK-based fast-retransmit would recover quicker than waiting for the RTO and is the natural refinement.
-- The STUN client discovers a host's public endpoint, but the two peers still need an out-of-band channel to exchange those endpoints, and the simultaneous-open hole punch is not yet coordinated automatically. No TURN-style relay is bundled.
+- WAN NAT traversal is coordinated end to end (`core/nat.py`): STUN endpoint discovery, a TCP rendezvous that swaps the two peers' endpoints by token, and simultaneous-open UDP hole punching via `wan_connect`. Not bundled: a TURN-style relay fallback for symmetric NATs where hole punching cannot succeed. The path is verified on loopback, not across real NATs.
 - VLAN mode validates policy and metadata, not L2 802.1Q tagged frame generation.
 
 ## Skills Demonstrated
