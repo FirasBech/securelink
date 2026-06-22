@@ -152,6 +152,7 @@ securelink/
 │   ├── test_guards.py
 │   ├── test_cli.py
 │   └── test_dashboard.py
+├── LICENSE
 └── README.md
 ```
 
@@ -256,13 +257,9 @@ control), built and debugged against a packet-loss test harness.
 
 ## License & Disclaimer
 
-Copyright © 2026 Firas Bech. All rights reserved.
-
-This software is provided for educational and portfolio purposes only, on an "as
-is" basis and without warranty of any kind, express or implied, including but not
-limited to the warranties of merchantability, fitness for a particular purpose,
-and non-infringement. The author is not liable for any claim, damage, or other
-liability arising from its use.
+Released under the [MIT License](LICENSE) — Copyright © 2026 Firas Bech. The
+software is provided "as is", without warranty of any kind; see the license for
+the full text.
 
 SecureLink includes network-monitoring features (packet capture, ARP and TTL
 inspection). Use them only on networks and devices you own or are explicitly
