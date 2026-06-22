@@ -151,13 +151,13 @@ securelink/
 ├── ui/
 │   ├── cli.py           CLI entrypoint (argparse)
 │   └── dashboard.py     PyQt5 GUI dashboard
+├── SecureLink.bat       One-click launcher (just double-click)
 ├── config/
 │   └── vlan_policy.json Per-VLAN ACL rules
 ├── assets/
 │   └── securelink.ico   Application / taskbar icon
 ├── scripts/
-│   ├── run_dashboard.pyw Double-click launcher (no console)
-│   └── SecureLink.bat    Double-click launcher (batch)
+│   └── run_dashboard.pyw Launcher implementation (no console)
 ├── docs/
 │   ├── MANUAL.md        User manual
 │   ├── FAQ.md           Common questions
@@ -241,10 +241,11 @@ python -m ui.cli status
 python -m ui.dashboard
 ```
 
-On Windows you can also just double-click `scripts/run_dashboard.pyw` or
-`scripts/SecureLink.bat` to launch the GUI without a terminal (the `.pyw` opens
-with `pythonw`, so no console window appears), or use the **SecureLink Dashboard**
-Start Menu / Desktop shortcut. The dashboard both sends files and listens for incoming
+On Windows the easiest way is to just double-click **`SecureLink.bat`** in the
+project folder — no terminal or commands needed. You can also use the
+**SecureLink Dashboard** Start Menu / Desktop shortcut. (Both launch the GUI
+with `pythonw`, so no console window appears.) The dashboard both sends files
+and listens for incoming
 transfers (LAN or WAN, with start/stop), alongside the discovered-peer map, live
 logs, and alerts.
 
