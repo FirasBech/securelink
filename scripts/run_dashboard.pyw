@@ -2,7 +2,7 @@
 
 On Windows, ``.pyw`` files open with ``pythonw.exe``, so the GUI starts with no
 console window. From a file manager, double-click this file (or SecureLink.bat,
-or the desktop shortcut). It also works headless-free from any directory by
+or the Start Menu / Desktop shortcut). It also works from any directory by
 pinning the project root onto the path.
 """
 
@@ -12,7 +12,7 @@ import os
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+ROOT = Path(__file__).resolve().parents[1]
 os.chdir(ROOT)
 sys.path.insert(0, str(ROOT))
 

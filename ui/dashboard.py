@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import sys
 import threading
 import time
 from datetime import date
@@ -41,6 +42,26 @@ from core.transport import TransportConfig, receive_file, send_file
 from core.udp_transport import udp_receive_file, udp_send_file
 
 LOG_DIR = Path.home() / ".securelink" / "logs"
+ICON_PATH = Path(__file__).resolve().parents[1] / "assets" / "securelink.ico"
+APP_USER_MODEL_ID = "FirasBech.SecureLink.Dashboard"
+
+
+def _claim_taskbar_identity() -> None:
+    """Tell Windows this process is its own app, not a generic Python host.
+
+    Without an explicit AppUserModelID the taskbar groups the GUI under
+    ``pythonw.exe`` and shows the Python icon. Setting our own id makes Windows
+    use the window/application icon instead. No-op off Windows or if the call
+    is unavailable.
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)
+    except Exception:
+        pass
 
 
 def _read_today_log_entries() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -129,9 +150,8 @@ class DashboardWindow(QMainWindow):
 
     def _build_window(self) -> None:
         self.setWindowTitle("SecureLink Dashboard")
-        icon_path = Path(__file__).resolve().parents[1] / "assets" / "securelink.ico"
-        if icon_path.exists():
-            self.setWindowIcon(QIcon(str(icon_path)))
+        if ICON_PATH.exists():
+            self.setWindowIcon(QIcon(str(ICON_PATH)))
         self._build_menu()
         self.resize(1480, 920)
         self.setMinimumSize(1240, 780)
@@ -1009,12 +1029,18 @@ DashboardApp = DashboardWindow
 
 
 def launch_dashboard() -> int:
+    _claim_taskbar_identity()
+
     app = QApplication.instance()
     owns_app = app is None
     if app is None:
         app = QApplication([])
 
     assert app is not None
+    app.setApplicationName("SecureLink")
+    app.setApplicationDisplayName("SecureLink Dashboard")
+    if ICON_PATH.exists():
+        app.setWindowIcon(QIcon(str(ICON_PATH)))
     app.setStyle("Fusion")
 
     window = DashboardWindow()

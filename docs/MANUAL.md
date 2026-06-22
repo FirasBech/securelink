@@ -26,8 +26,9 @@ pip install "cryptography>=42" "scapy>=2.5" "zeroconf>=0.132" "PyQt5>=5.15" "pyt
 
 **Dashboard (GUI):**
 
-- Windows: double-click `run_dashboard.pyw` or `SecureLink.bat`, or use the
-  Desktop / Start Menu **SecureLink Dashboard** shortcut. No terminal needed.
+- Windows: double-click `scripts/run_dashboard.pyw` or `scripts/SecureLink.bat`,
+  or use the Desktop / Start Menu **SecureLink Dashboard** shortcut. No terminal
+  needed.
 - Any OS: `python -m ui.dashboard`
 
 **Command line:** `python -m ui.cli <command>` (see section 5).

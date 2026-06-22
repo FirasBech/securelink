@@ -27,8 +27,8 @@ env/
 Thumbs.db
 
 # SecureLink runtime artifacts (identity keys, known_hosts, session state, logs)
+# All per-user state lives under ~/.securelink/
 .securelink/
-logs/*.json
 
 # Kept locally but not published: deps live in the README, CLAUDE.md is dev notes
 requirements.txt
