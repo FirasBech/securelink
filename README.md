@@ -152,6 +152,8 @@ securelink/
 │   ├── test_guards.py
 │   ├── test_cli.py
 │   └── test_dashboard.py
+├── run_dashboard.pyw   double-click launcher (no console)
+├── SecureLink.bat      double-click launcher
 ├── LICENSE
 └── README.md
 ```
@@ -219,8 +221,11 @@ python -m ui.cli status
 python -m ui.dashboard
 ```
 
-The dashboard both sends files and listens for incoming transfers (LAN or WAN,
-with start/stop), alongside the discovered-peer map, live logs, and alerts.
+On Windows you can also just double-click `run_dashboard.pyw` or `SecureLink.bat`
+to launch the GUI without a terminal (the `.pyw` opens with `pythonw`, so no
+console window appears). The dashboard both sends files and listens for incoming
+transfers (LAN or WAN, with start/stop), alongside the discovered-peer map, live
+logs, and alerts.
 
 ## VLAN Policy
 
