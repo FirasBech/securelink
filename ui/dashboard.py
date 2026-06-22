@@ -3,6 +3,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import threading
+import time
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -79,6 +80,15 @@ def _format_peer_display(peer: dict[str, Any]) -> str:
     return f"{name} | {address}:{port} | {vlan_text} | {trusted}"
 
 
+def _human_bytes(value: float) -> str:
+    size = float(value)
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} GB"
+
+
 def _severity_for_event(payload: dict[str, Any]) -> str:
     event_name = str(payload.get("event") or "event")
     if payload.get("alert"):
@@ -96,6 +106,7 @@ class DashboardWindow(QMainWindow):
     status_changed = pyqtSignal(str)
     transfer_finished = pyqtSignal(str, int, int)
     transfer_failed = pyqtSignal(str)
+    transfer_progress = pyqtSignal(int, int)
     receive_finished = pyqtSignal(str, int, int)
     receive_failed = pyqtSignal(str)
 
@@ -275,6 +286,7 @@ class DashboardWindow(QMainWindow):
         self.status_changed.connect(self._set_status)
         self.transfer_finished.connect(self._on_transfer_finished)
         self.transfer_failed.connect(self._on_transfer_failed)
+        self.transfer_progress.connect(self._on_transfer_progress)
         self.receive_finished.connect(self._on_receive_finished)
         self.receive_failed.connect(self._on_receive_failed)
 
@@ -729,22 +741,44 @@ class DashboardWindow(QMainWindow):
             vlan_id=vlan_id,
         )
 
-        self.progress_bar.setRange(0, 0)
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
         self.transfer_detail_label.setText("Sending...")
         self.status_changed.emit(f"Sending {Path(file_path).name} in {mode.upper()} mode...")
+        self._transfer_start = time.monotonic()
+
+        last_emit = [0.0]
+
+        def on_progress(sent: int, total: int) -> None:
+            now = time.monotonic()
+            if sent >= total or now - last_emit[0] >= 0.05:
+                last_emit[0] = now
+                self.transfer_progress.emit(sent, total)
 
         def _worker() -> None:
             try:
                 if mode == "wan":
-                    stats = udp_send_file(file_path, peer_host, config.port, config=config)
+                    stats = udp_send_file(
+                        file_path, peer_host, config.port, config=config, progress=on_progress
+                    )
                 else:
-                    stats = send_file(file_path, peer_host, config=config)
+                    stats = send_file(file_path, peer_host, config=config, progress=on_progress)
             except Exception as exc:
                 self.transfer_failed.emit(str(exc))
                 return
             self.transfer_finished.emit(file_path, stats.bytes_transferred, stats.chunks)
 
         threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_transfer_progress(self, sent: int, total: int) -> None:
+        percent = int(sent * 100 / total) if total else 0
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(percent)
+        elapsed = time.monotonic() - getattr(self, "_transfer_start", time.monotonic())
+        rate = sent / elapsed if elapsed > 0 else 0.0
+        self.transfer_detail_label.setText(
+            f"{_human_bytes(sent)} / {_human_bytes(total)}  ·  {_human_bytes(rate)}/s"
+        )
 
     def _resolve_transport_mode(self, peer_host: str, vlan_id: int | None) -> str:
         choice = self.mode_combo.currentText().strip().lower()
@@ -763,7 +797,9 @@ class DashboardWindow(QMainWindow):
     def _on_transfer_finished(self, file_path: str, bytes_sent: int, chunks: int) -> None:
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(100)
-        self.transfer_detail_label.setText(f"{bytes_sent} bytes across {chunks} chunk(s)")
+        self.transfer_detail_label.setText(
+            f"Sent {_human_bytes(bytes_sent)} across {chunks} chunk(s)"
+        )
         self.status_changed.emit(f"Sent {Path(file_path).name} successfully")
         self.refresh_logs()
 

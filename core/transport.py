@@ -282,15 +282,18 @@ def stream_send(
     trust_prompt: Callable[[str], bool] | None = None,
     base_dir: Path | None = None,
     chunk_size: int | None = None,
+    progress: Callable[[int, int], None] | None = None,
 ) -> TransferStats:
     """Run the client handshake and stream a file as capsules over ``channel``.
 
     Transport-agnostic: works over any :class:`FrameChannel` (TCP or reliable
     UDP). ``chunk_size`` overrides the MTU-derived plaintext read size for
-    datagram transports that must avoid IP fragmentation.
+    datagram transports that must avoid IP fragmentation. ``progress`` is called
+    after each chunk with ``(bytes_sent, total_bytes)``.
     """
 
     stats = TransferStats()
+    total = transfer_path.stat().st_size
     handshake = _perform_client_handshake(
         channel,
         allow_unknown=transfer_config.allow_unknown,
@@ -315,6 +318,8 @@ def stream_send(
             stats.bytes_transferred += len(plaintext)
             stats.chunks += 1
             sequence += 1
+            if progress is not None:
+                progress(stats.bytes_transferred, total)
 
     # Confirm every frame landed before the channel closes (matters for UDP,
     # where the last unacked frames would otherwise be lost on close).
@@ -372,6 +377,7 @@ def send_file(
     config: TransportConfig | None = None,
     trust_prompt: Callable[[str], bool] | None = None,
     base_dir: Path | None = None,
+    progress: Callable[[int, int], None] | None = None,
 ) -> TransferStats:
     transfer_path = Path(file_path)
     if not transfer_path.exists():
@@ -386,6 +392,7 @@ def send_file(
             transfer_config,
             trust_prompt=trust_prompt,
             base_dir=base_dir,
+            progress=progress,
         )
 
 

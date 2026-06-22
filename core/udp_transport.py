@@ -329,6 +329,7 @@ def udp_send_file(
     trust_prompt: Callable[[str], bool] | None = None,
     base_dir: Path | None = None,
     chunk_size: int | None = None,
+    progress: Callable[[int, int], None] | None = None,
 ) -> TransferStats:
     """Send a file to ``peer_host:peer_port`` over reliable UDP (WAN mode)."""
 
@@ -348,6 +349,7 @@ def udp_send_file(
             transfer_config,
             trust_prompt=trust_prompt,
             base_dir=base_dir,
+            progress=progress,
             chunk_size=chunk_size if chunk_size is not None else wan_chunk_size(),
         )
     finally:
