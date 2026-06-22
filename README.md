@@ -103,11 +103,16 @@ securelink/
 │   ├── test_crypto_capsule.py
 │   ├── test_transport_modes.py
 │   ├── test_udp_transport.py
+│   ├── test_udp_reliability.py
 │   ├── test_stun.py
+│   ├── test_nat.py
+│   ├── test_discovery.py
 │   ├── test_identity.py
 │   ├── test_guards.py
+│   ├── test_cli.py
 │   └── test_dashboard.py
 ├── requirements.txt
+├── CLAUDE.md
 └── README.md
 ```
 
