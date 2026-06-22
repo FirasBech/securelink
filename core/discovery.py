@@ -108,4 +108,11 @@ def auto_select_transport_mode(
 ) -> str:
     if vlan_id is not None:
         return "vlan"
+    if peer_address:
+        try:
+            ip = ipaddress.ip_address(peer_address)
+        except ValueError:
+            return "lan"  # a hostname is assumed to be local/LAN
+        if not (ip.is_private or ip.is_loopback or ip.is_link_local):
+            return "wan"  # a public address routes over the WAN transport
     return "lan"

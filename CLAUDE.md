@@ -67,7 +67,9 @@ Three layers, strict one-directional dependency: `ui` → `core` + `security`.
   ready for `ReliableUdpChannel`). Probe bytes 0x02/0x03 stay clear of the
   transport's 0x00/0x01.
 - **discovery.py** — mDNS announce/scan (zeroconf). `auto_select_transport_mode`
-  returns `"vlan"` if a vlan_id is set, else `"lan"`.
+  returns `"vlan"` for a set vlan_id, `"wan"` for a public peer IP, else `"lan"`.
+  The CLI/dashboard route `"wan"` to `udp_send_file`; `--wan` / the WAN combo
+  force it.
 
 ### `security/` — passive monitoring
 

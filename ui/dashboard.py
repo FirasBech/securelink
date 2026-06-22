@@ -35,6 +35,7 @@ from PyQt5.QtWidgets import (
 
 from core.discovery import discover_peers
 from core.transport import TransportConfig, send_file
+from core.udp_transport import udp_send_file
 
 LOG_DIR = Path.home() / ".securelink" / "logs"
 
@@ -295,7 +296,7 @@ class DashboardWindow(QMainWindow):
         self.peer_port_spin.setValue(55000)
 
         self.mode_combo = QComboBox()
-        self.mode_combo.addItems(["Auto", "LAN", "VLAN"])
+        self.mode_combo.addItems(["Auto", "LAN", "VLAN", "WAN"])
 
         self.mtu_spin = QSpinBox()
         self.mtu_spin.setRange(576, 9000)
@@ -603,7 +604,10 @@ class DashboardWindow(QMainWindow):
 
         def _worker() -> None:
             try:
-                stats = send_file(file_path, peer_host, config=config)
+                if mode == "wan":
+                    stats = udp_send_file(file_path, peer_host, config.port, config=config)
+                else:
+                    stats = send_file(file_path, peer_host, config=config)
             except Exception as exc:
                 self.transfer_failed.emit(str(exc))
                 return
@@ -613,7 +617,7 @@ class DashboardWindow(QMainWindow):
 
     def _resolve_transport_mode(self, peer_host: str, vlan_id: int | None) -> str:
         choice = self.mode_combo.currentText().strip().lower()
-        if choice in {"lan", "vlan"}:
+        if choice in {"lan", "vlan", "wan"}:
             return choice
         if vlan_id is not None:
             return "vlan"
@@ -623,7 +627,7 @@ class DashboardWindow(QMainWindow):
             return "lan"
         if peer_ip.is_private or peer_ip.is_loopback or peer_ip.is_link_local:
             return "lan"
-        return "lan"
+        return "wan"
 
     def _on_transfer_finished(self, file_path: str, bytes_sent: int, chunks: int) -> None:
         self.progress_bar.setRange(0, 100)

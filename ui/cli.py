@@ -60,26 +60,19 @@ def _prompt_trust(fingerprint: str) -> bool:
 
 def _cmd_send(args: argparse.Namespace) -> int:
     base_dir = _base_dir(args)
-    if args.wan:
-        config = TransportConfig(
-            mode="wan",
-            port=args.port,
-            mtu=args.mtu,
-            allow_unknown=args.allow_unknown,
-            vlan_id=args.vlan,
-        )
+    mode = "wan" if args.wan else auto_select_transport_mode(vlan_id=args.vlan, peer_address=args.peer)
+    config = TransportConfig(
+        mode=mode,
+        port=args.port,
+        mtu=args.mtu,
+        allow_unknown=args.allow_unknown,
+        vlan_id=args.vlan,
+    )
+    if mode == "wan":
         stats = udp_send_file(
             args.file, args.peer, args.port, config=config, trust_prompt=_prompt_trust, base_dir=base_dir
         )
     else:
-        mode = auto_select_transport_mode(vlan_id=args.vlan, peer_address=args.peer)
-        config = TransportConfig(
-            mode=mode,
-            port=args.port,
-            mtu=args.mtu,
-            allow_unknown=args.allow_unknown,
-            vlan_id=args.vlan,
-        )
         stats = send_file(args.file, args.peer, config=config, trust_prompt=_prompt_trust, base_dir=base_dir)
     _update_state(stats, "send", base_dir)
     print(json.dumps({"status": "sent", "bytes": stats.bytes_transferred, "chunks": stats.chunks}, indent=2))
