@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QColor, QFont
+from PyQt5.QtGui import QColor, QFont, QIcon
 from PyQt5.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -127,6 +127,9 @@ class DashboardWindow(QMainWindow):
 
     def _build_window(self) -> None:
         self.setWindowTitle("SecureLink Dashboard")
+        icon_path = Path(__file__).resolve().parents[1] / "assets" / "securelink.ico"
+        if icon_path.exists():
+            self.setWindowIcon(QIcon(str(icon_path)))
         self.resize(1480, 920)
         self.setMinimumSize(1240, 780)
         self._apply_styles()
