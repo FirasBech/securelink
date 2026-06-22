@@ -25,22 +25,9 @@ LAN and VLAN use direct TCP. WAN uses reliable UDP (selective-repeat windowed AR
 | MITM detection | ARP spoof monitoring + TTL anomaly alerts |
 | Audit logging | Structured JSON logs under `~/.securelink/logs/` |
 
-## Project Status
+## Status
 
-SecureLink is currently implemented as a working file transfer prototype with a PyQt5 dashboard, CLI entrypoint, and verified transport coverage for LAN, VLAN, and WAN (reliable-UDP) loopback paths.
-
-Verified in this workspace:
-
-- Core crypto, capsule, auth, discovery, STUN, transport, UDP transport, guard, and UI modules are in place.
-- LAN, VLAN, and WAN (reliable-UDP) loopback tests pass, and the STUN codec is unit-tested.
-- The dashboard launches with `python -m ui.dashboard`.
-- The full test suite is green.
-
-Current caveats:
-
-- WAN reliability is a selective-repeat windowed ARQ, verified under simulated bidirectional packet loss.
-- NAT hole-punch coordination needs an out-of-band signaling exchange, and no TURN-style relay is bundled.
-- VLAN support is policy enforcement and metadata, not 802.1Q tagged frame generation.
+A working prototype with a CLI and a PyQt5 dashboard. LAN, VLAN, and WAN transfers all run; the WAN path is exercised over loopback and against a packet-loss harness, not across real NATs. The test suite (`pytest`) is green. This is a learning/portfolio build, not hardened for production — see Known Limitations.
 
 ## Architecture
 
@@ -185,10 +172,6 @@ pip install "cryptography>=42" "scapy>=2.5" "zeroconf>=0.132" "PyQt5>=5.15" "pyt
 ## Usage
 
 ### CLI
-
-The command line entrypoint is `python -m ui.cli`.
-
-Examples:
 
 ```bash
 # Send a file over LAN
