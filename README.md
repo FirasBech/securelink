@@ -253,3 +253,18 @@ in `core/transport.py` — one authenticated, encrypted path shared by the TCP a
 UDP transports — and the from-scratch reliable-UDP transport in
 `core/udp_transport.py` (selective-repeat ARQ, RFC 6298 RTO, AIMD congestion
 control), built and debugged against a packet-loss test harness.
+
+## License & Disclaimer
+
+Copyright © 2026 Firas Bech. All rights reserved.
+
+This software is provided for educational and portfolio purposes only, on an "as
+is" basis and without warranty of any kind, express or implied, including but not
+limited to the warranties of merchantability, fitness for a particular purpose,
+and non-infringement. The author is not liable for any claim, damage, or other
+liability arising from its use.
+
+SecureLink includes network-monitoring features (packet capture, ARP and TTL
+inspection). Use them only on networks and devices you own or are explicitly
+authorized to monitor. You are responsible for complying with all applicable
+laws and regulations.
