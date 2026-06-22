@@ -15,6 +15,8 @@ LAN and VLAN use direct TCP. WAN uses reliable UDP (selective-repeat windowed AR
 
 The manual and FAQ are also in the app under **Help** in the menu bar.
 
+![The SecureLink dashboard](docs/screenshots/dashboard.png)
+
 ## What It Does
 
 | Mode | Transport | Discovery / Control |

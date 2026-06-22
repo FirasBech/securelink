@@ -84,6 +84,8 @@ Everything per-user is under `~/.securelink/`:
 
 ## 4. Using the dashboard
 
+![The SecureLink dashboard](screenshots/dashboard.png)
+
 The window has a **Transfer** and **Receive** panel on the left, and the
 **Network Map**, **Live Log**, and **Alert** panels on the right.
 
