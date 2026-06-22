@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import socket
 import struct
+import threading
 import time
 from collections import deque
 from pathlib import Path
@@ -85,6 +86,7 @@ class ReliableUdpChannel:
         max_rto: float = RTO_MAX,
         max_retries: int = 40,
         recv_timeout: float = 20.0,
+        cancel_event: threading.Event | None = None,
     ) -> None:
         self._sock = sock
         self._peer_addr = peer_addr
@@ -92,6 +94,7 @@ class ReliableUdpChannel:
         self._window = max(1, window)
         self._max_retries = max_retries
         self._recv_timeout = recv_timeout
+        self._cancel_event = cancel_event
 
         # Adaptive RTO (RFC 6298): smoothed RTT + variance, with Karn's algorithm
         # (ignore samples from retransmitted frames) and exponential backoff.
@@ -274,6 +277,8 @@ class ReliableUdpChannel:
     def recv_frame(self) -> bytes:
         deadline = time.monotonic() + self._recv_timeout
         while not self._delivered:
+            if self._cancel_event is not None and self._cancel_event.is_set():
+                raise TransportError("receive cancelled")
             if time.monotonic() >= deadline:
                 raise TransportError("reliable UDP receive timed out")
             self._pump(block=True)
@@ -354,6 +359,7 @@ def udp_receive_file(
     config: TransportConfig | None = None,
     trust_prompt: Callable[[str], bool] | None = None,
     base_dir: Path | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> tuple[Path, TransferStats]:
     """Receive a file over reliable UDP (WAN mode).
 
@@ -367,7 +373,9 @@ def udp_receive_file(
     try:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.bind((transfer_config.bind_host, transfer_config.port))
-        channel = ReliableUdpChannel(sock, None, allowlist=transfer_config.allowlist)
+        channel = ReliableUdpChannel(
+            sock, None, allowlist=transfer_config.allowlist, cancel_event=cancel_event
+        )
         result = stream_receive(
             channel,
             transfer_config,

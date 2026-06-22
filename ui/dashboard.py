@@ -34,8 +34,8 @@ from PyQt5.QtWidgets import (
 )
 
 from core.discovery import discover_peers
-from core.transport import TransportConfig, send_file
-from core.udp_transport import udp_send_file
+from core.transport import TransportConfig, receive_file, send_file
+from core.udp_transport import udp_receive_file, udp_send_file
 
 LOG_DIR = Path.home() / ".securelink" / "logs"
 
@@ -96,11 +96,15 @@ class DashboardWindow(QMainWindow):
     status_changed = pyqtSignal(str)
     transfer_finished = pyqtSignal(str, int, int)
     transfer_failed = pyqtSignal(str)
+    receive_finished = pyqtSignal(str, int, int)
+    receive_failed = pyqtSignal(str)
 
     def __init__(self, auto_refresh: bool = True) -> None:
         super().__init__()
         self._auto_refresh = auto_refresh
         self._peers: list[dict[str, Any]] = []
+        self._receive_thread: threading.Thread | None = None
+        self._receive_cancel: threading.Event | None = None
         self._build_window()
         self._connect_signals()
         self._configure_refresh()
@@ -159,6 +163,7 @@ class DashboardWindow(QMainWindow):
         right_layout.setSpacing(12)
 
         self._build_transfer_panel(left_layout)
+        self._build_receive_panel(left_layout)
         self._build_network_panel(left_layout)
         self._build_log_panel(right_layout)
         self._build_alert_panel(right_layout)
@@ -270,6 +275,8 @@ class DashboardWindow(QMainWindow):
         self.status_changed.connect(self._set_status)
         self.transfer_finished.connect(self._on_transfer_finished)
         self.transfer_failed.connect(self._on_transfer_failed)
+        self.receive_finished.connect(self._on_receive_finished)
+        self.receive_failed.connect(self._on_receive_failed)
 
     def _build_transfer_panel(self, parent_layout: QVBoxLayout) -> None:
         group = QGroupBox("Transfer Panel")
@@ -352,6 +359,130 @@ class DashboardWindow(QMainWindow):
         grid.addWidget(self.transfer_detail_label, 6, 3)
 
         parent_layout.addWidget(group)
+
+    def _build_receive_panel(self, parent_layout: QVBoxLayout) -> None:
+        group = QGroupBox("Receive Panel")
+        grid = QGridLayout(group)
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(10)
+        grid.setColumnStretch(1, 1)
+
+        self.recv_port_spin = QSpinBox()
+        self.recv_port_spin.setRange(1, 65535)
+        self.recv_port_spin.setValue(55000)
+
+        self.recv_wan_checkbox = QCheckBox("WAN (reliable UDP)")
+
+        self.recv_output_edit = QLineEdit(str(Path.cwd()))
+        recv_browse_button = QPushButton("Browse")
+        recv_browse_button.clicked.connect(self.choose_output_dir)
+
+        self.recv_allowlist_edit = QLineEdit()
+        self.recv_allowlist_edit.setPlaceholderText("Allowlist, e.g. 192.168.1.0/24, 10.0.0.5")
+
+        self.recv_allow_unknown_checkbox = QCheckBox("Allow unknown devices")
+
+        self.receive_button = QPushButton("Start Listening")
+        self.receive_button.clicked.connect(self.toggle_receiving)
+
+        self.receive_status_label = QLabel("Idle")
+        self.receive_status_label.setObjectName("ReceiveStatus")
+
+        grid.addWidget(QLabel("Port"), 0, 0)
+        grid.addWidget(self.recv_port_spin, 0, 1)
+        grid.addWidget(self.recv_wan_checkbox, 0, 2, 1, 2)
+
+        grid.addWidget(QLabel("Save to"), 1, 0)
+        grid.addWidget(self.recv_output_edit, 1, 1, 1, 2)
+        grid.addWidget(recv_browse_button, 1, 3)
+
+        grid.addWidget(QLabel("Allowlist"), 2, 0)
+        grid.addWidget(self.recv_allowlist_edit, 2, 1)
+        grid.addWidget(self.recv_allow_unknown_checkbox, 2, 2, 1, 2)
+
+        button_row = QHBoxLayout()
+        button_row.addWidget(self.receive_button)
+        button_row.addWidget(self.receive_status_label, 1)
+        grid.addLayout(button_row, 3, 0, 1, 4)
+
+        parent_layout.addWidget(group)
+
+    def choose_output_dir(self) -> None:
+        directory = QFileDialog.getExistingDirectory(
+            self,
+            "Select download directory",
+            self.recv_output_edit.text().strip() or str(Path.cwd()),
+        )
+        if directory:
+            self.recv_output_edit.setText(directory)
+
+    def toggle_receiving(self) -> None:
+        if self._receive_thread is not None and self._receive_thread.is_alive():
+            if self._receive_cancel is not None:
+                self._receive_cancel.set()
+            self.receive_button.setEnabled(False)
+            self.receive_status_label.setText("Stopping...")
+            return
+
+        output_dir = self.recv_output_edit.text().strip() or str(Path.cwd())
+        allowlist = tuple(
+            entry.strip()
+            for entry in self.recv_allowlist_edit.text().split(",")
+            if entry.strip()
+        )
+        wan = self.recv_wan_checkbox.isChecked()
+        config = TransportConfig(
+            mode="wan" if wan else "lan",
+            port=self.recv_port_spin.value(),
+            allow_unknown=self.recv_allow_unknown_checkbox.isChecked(),
+            allowlist=allowlist,
+            output_dir=Path(output_dir),
+        )
+        cancel = threading.Event()
+        self._receive_cancel = cancel
+
+        self.receive_button.setText("Stop")
+        self.receive_status_label.setText(
+            f"Listening on :{config.port} ({config.mode.upper()})..."
+        )
+        self.status_changed.emit(f"Listening for a file on :{config.port}")
+
+        def _worker() -> None:
+            try:
+                if wan:
+                    output_path, stats = udp_receive_file(config=config, cancel_event=cancel)
+                else:
+                    output_path, stats = receive_file(config=config, cancel_event=cancel)
+            except Exception as exc:
+                self.receive_failed.emit(str(exc))
+                return
+            self.receive_finished.emit(str(output_path), stats.bytes_transferred, stats.chunks)
+
+        self._receive_thread = threading.Thread(target=_worker, daemon=True)
+        self._receive_thread.start()
+
+    def _reset_receive_button(self) -> None:
+        self.receive_button.setText("Start Listening")
+        self.receive_button.setEnabled(True)
+
+    def _on_receive_finished(self, path: str, bytes_received: int, chunks: int) -> None:
+        self._reset_receive_button()
+        name = Path(path).name
+        self.receive_status_label.setText(
+            f"Received {name} ({bytes_received} bytes, {chunks} chunk(s))"
+        )
+        self.status_changed.emit(f"Received {name}")
+        self.refresh_logs()
+
+    def _on_receive_failed(self, message: str) -> None:
+        self._reset_receive_button()
+        if "cancel" in message.lower():
+            self.receive_status_label.setText("Stopped")
+            self.status_changed.emit("Receive stopped")
+            return
+        self.receive_status_label.setText("Receive failed")
+        self.status_changed.emit("Receive failed")
+        QMessageBox.critical(self, "SecureLink", message)
 
     def _build_network_panel(self, parent_layout: QVBoxLayout) -> None:
         group = QGroupBox("Network Map")
@@ -662,6 +793,8 @@ class DashboardWindow(QMainWindow):
     def closeEvent(self, event) -> None:  # type: ignore[override]
         if hasattr(self, "_log_timer"):
             self._log_timer.stop()
+        if self._receive_cancel is not None:
+            self._receive_cancel.set()
         super().closeEvent(event)
 
 

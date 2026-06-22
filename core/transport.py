@@ -5,6 +5,7 @@ import json
 import os
 import socket
 import struct
+import threading
 from dataclasses import dataclass, field
 from hashlib import sha256
 from pathlib import Path
@@ -388,11 +389,30 @@ def send_file(
         )
 
 
+def _accept(
+    server_socket: socket.socket,
+    cancel_event: threading.Event | None,
+) -> tuple[socket.socket, Any]:
+    """Accept a connection, polling ``cancel_event`` so a caller can stop waiting."""
+
+    if cancel_event is None:
+        return server_socket.accept()
+    server_socket.settimeout(0.5)
+    while True:
+        if cancel_event.is_set():
+            raise TransportError("listen cancelled")
+        try:
+            return server_socket.accept()
+        except socket.timeout:
+            continue
+
+
 def receive_file(
     *,
     config: TransportConfig | None = None,
     trust_prompt: Callable[[str], bool] | None = None,
     base_dir: Path | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> tuple[Path, TransferStats]:
     transfer_config = config or TransportConfig()
 
@@ -400,7 +420,7 @@ def receive_file(
         server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server_socket.bind((transfer_config.bind_host, transfer_config.port))
         server_socket.listen(1)
-        connection, address = server_socket.accept()
+        connection, address = _accept(server_socket, cancel_event)
         with connection:
             _validate_allowlist(address[0], transfer_config.allowlist)
             return stream_receive(

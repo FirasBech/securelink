@@ -219,6 +219,9 @@ python -m ui.cli status
 python -m ui.dashboard
 ```
 
+The dashboard both sends files and listens for incoming transfers (LAN or WAN,
+with start/stop), alongside the discovered-peer map, live logs, and alerts.
+
 ## VLAN Policy
 
 Edit `config/vlan_policy.json` to define inter-VLAN transfer rules.

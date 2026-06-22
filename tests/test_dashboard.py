@@ -14,6 +14,10 @@ def test_dashboard_window_initializes_offscreen() -> None:
     window = DashboardWindow(auto_refresh=False)
 
     assert window.windowTitle() == "SecureLink Dashboard"
+    # The receive panel is present and idle on launch.
+    assert window.receive_button.text() == "Start Listening"
+    assert window.recv_port_spin.value() == 55000
+    assert "WAN" in window.recv_wan_checkbox.text()
 
     window.close()
     window.deleteLater()
