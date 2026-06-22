@@ -44,21 +44,75 @@ Current caveats:
 
 ## Architecture
 
+Three packages with one-way dependencies: `ui` → `core` + `security`. `core`
+performs the transfer, `security` does passive monitoring, and neither depends
+on `ui`.
+
+### One envelope, two transports
+
+Every transport implements `FrameChannel`: send and receive length-delimited
+byte frames. The handshake, manifest exchange, and encrypted capsule stream are
+written once against that interface (`stream_send` / `stream_receive` in
+`transport.py`) and run unchanged over either backing transport:
+
+- **`_StreamChannel`** wraps a TCP socket (LAN, VLAN); TCP supplies ordering and
+  reliability.
+- **`ReliableUdpChannel`** (`udp_transport.py`) gives the same guarantees over
+  UDP for WAN, adding its own selective-repeat ARQ, RTT-adaptive retransmit
+  timeout (RFC 6298 + Karn), and AIMD congestion window.
+
+A "mode" is just which channel is used; the security envelope above it is
+identical.
+
 ```mermaid
-flowchart LR
-  UI[CLI / PyQt5 Dashboard] --> CFG[TransportConfig]
-  UI --> DISC[Discovery]
-  DISC --> MODE{Transport mode}
-  MODE --> LAN[LAN TCP]
-  MODE --> WAN[WAN UDP + STUN]
-  MODE --> VLAN[VLAN policy + metadata]
-  LAN --> AUTH[Identity + handshake]
-  WAN --> AUTH
-  VLAN --> AUTH
-  AUTH --> CRYPTO[Capsule: X25519, AES-GCM, HMAC, sequence]
-  CRYPTO --> IO[File read / write]
-  CRYPTO --> LOG[JSON logs + security guards]
+flowchart TD
+  UI[CLI / Dashboard] --> SEL{transport mode}
+  SEL -->|LAN, VLAN| TCP[_StreamChannel / TCP]
+  SEL -->|WAN| NAT[STUN + rendezvous + hole punch] --> UDP[ReliableUdpChannel / UDP]
+  TCP --> CH[FrameChannel]
+  UDP --> CH
+  CH --> HS[handshake: Ed25519 + X25519 + TOFU]
+  HS --> CAP[capsule stream: AES-256-GCM + HMAC + sequence]
+  CAP --> FILE[(file)]
 ```
+
+### Lifecycle of a transfer
+
+1. **Select mode** — `auto_select_transport_mode` chooses LAN, VLAN, or WAN from
+   the peer address and VLAN id; `--wan` or the dashboard can override it.
+2. **Connect** — LAN/VLAN open a TCP connection; WAN binds a UDP socket (and, for
+   NAT'd peers, runs the setup below).
+3. **Handshake** — each side sends its Ed25519 identity key, an X25519 ephemeral
+   key, a nonce, and a signature over both keys. Each verifies the signature,
+   applies Trust-On-First-Use against `known_hosts.json`, then derives the
+   session key with HKDF salted by both nonces.
+4. **Manifest** — the sender sends filename, size, and mode.
+5. **Stream** — the file is chunked into capsules (`capsule.py`): a GRE-style
+   header, an HMAC over header + nonce + ciphertext, and an AES-256-GCM payload.
+   The receiver checks the HMAC before decrypting; a per-session sequence tracker
+   rejects replays and out-of-window gaps.
+
+### WAN and NAT traversal
+
+A directly reachable peer (port-forwarded, or UDP-reachable on the LAN) needs no
+setup — `udp_send_file` / `udp_receive_file` use `ReliableUdpChannel` straight
+away. For peers behind NAT, `nat.py` establishes the path first:
+
+1. each peer learns its public `ip:port` from a STUN server (`stun.py`);
+2. both contact a TCP rendezvous with a shared token, which swaps their
+   endpoints;
+3. each fires UDP probes at the other's endpoint until traffic flows both ways
+   (simultaneous open).
+
+`wan_connect` returns the punched socket, handed to `ReliableUdpChannel` like any
+other. There is no relay fallback for symmetric NATs.
+
+### Passive monitoring
+
+The `security` guards observe traffic out of band with Scapy: ARP-table changes
+(spoofing), TTL drops (a possible interception hop), and 802.1Q policy
+violations. Events are appended as JSON under `~/.securelink/logs/`, which the
+CLI `logs` command and the dashboard render.
 
 ## Capsule Wire Format
 
