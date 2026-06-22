@@ -1,8 +1,8 @@
 # SecureLink
 
-SecureLink is a security-focused Python file transfer tool for LAN, WAN, and enterprise VLAN environments. It demonstrates authenticated encryption, session identity, packet inspection, and audit logging for cross-network file transfer.
+SecureLink is a Python file-transfer tool for LAN, VLAN, and WAN. Every transfer is mutually authenticated, encrypted per chunk, and audit-logged, and the same security envelope runs over TCP on a LAN and over a reliable-UDP transport across the internet.
 
-LAN and VLAN use direct TCP transfer. WAN uses a reliable-UDP transport (selective-repeat windowed ARQ over UDP) with a built-in RFC 8489 STUN client, a TCP rendezvous for endpoint signaling, and simultaneous-open UDP hole punching. A TURN-style relay fallback (for symmetric NATs) is not bundled; see Known Limitations.
+LAN and VLAN use direct TCP. WAN uses reliable UDP (selective-repeat windowed ARQ) with an RFC 8489 STUN client, a TCP rendezvous for endpoint signaling, and simultaneous-open UDP hole punching. A TURN-style relay for symmetric NATs is not bundled (see Known Limitations).
 
 ## What It Does
 
@@ -165,15 +165,21 @@ securelink/
 │   ├── test_guards.py
 │   ├── test_cli.py
 │   └── test_dashboard.py
-├── requirements.txt
-├── CLAUDE.md
 └── README.md
 ```
 
 ## Install
 
+Python 3.11+ and five dependencies:
+
+- `cryptography` — X25519/Ed25519, AES-256-GCM, HKDF, HMAC
+- `scapy` — packet capture for the ARP/TTL/VLAN guards
+- `zeroconf` — mDNS peer discovery
+- `PyQt5` — dashboard GUI
+- `pytest` — test suite
+
 ```bash
-pip install -r requirements.txt
+pip install "cryptography>=42" "scapy>=2.5" "zeroconf>=0.132" "PyQt5>=5.15" "pytest>=8"
 ```
 
 ## Usage
@@ -257,10 +263,10 @@ pytest tests/ -v
 - WAN NAT traversal is coordinated end to end (`core/nat.py`): STUN endpoint discovery, a TCP rendezvous that swaps the two peers' endpoints by token, and simultaneous-open UDP hole punching via `wan_connect`. Not bundled: a TURN-style relay fallback for symmetric NATs where hole punching cannot succeed. The path is verified on loopback, not across real NATs.
 - VLAN mode validates policy and metadata, not L2 802.1Q tagged frame generation.
 
-## Skills Demonstrated
+## Notes
 
-`Python` `TCP/IP` `AES-256-GCM` `X25519` `HMAC-SHA256` `GRE encapsulation`
-
-`STUN RFC 8489` `UDP hole punching` `NAT traversal` `802.1Q VLAN`
-
-`Scapy` `ARP monitoring` `mDNS` `Ed25519` `TOFU` `JSON audit logging`
+A portfolio project. The parts worth reading are the `FrameChannel` abstraction
+in `core/transport.py` — one authenticated, encrypted path shared by the TCP and
+UDP transports — and the from-scratch reliable-UDP transport in
+`core/udp_transport.py` (selective-repeat ARQ, RFC 6298 RTO, AIMD congestion
+control), built and debugged against a packet-loss test harness.

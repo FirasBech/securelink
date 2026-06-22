@@ -29,3 +29,7 @@ Thumbs.db
 # SecureLink runtime artifacts (identity keys, known_hosts, session state, logs)
 .securelink/
 logs/*.json
+
+# Kept locally but not published: deps live in the README, CLAUDE.md is dev notes
+requirements.txt
+CLAUDE.md
