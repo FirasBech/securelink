@@ -31,7 +31,28 @@ class PeerAdvertisement:
 @dataclass(frozen=True)
 class LocalAddress:
     address: str
-    kind: str  # "lan" | "vpn" | "public" | "loopback"
+    kind: str  # "lan" | "vpn" | "public" | "loopback" | "link-local"
+
+
+@dataclass(frozen=True)
+class TailscaleState:
+    installed: bool          # the `tailscale` CLI is on PATH
+    running: bool            # BackendState == "Running"
+    logged_in: bool          # signed in to a tailnet (creds present)
+    backend_state: str       # raw BackendState, e.g. "Running" / "NeedsLogin" / "Stopped"
+    self_ip: str | None      # this host's tailnet IPv4, if any
+
+    def summary(self) -> str:
+        """A short, user-facing description of what (if anything) to do."""
+        if not self.installed:
+            return ""  # Tailscale isn't used here; say nothing
+        if not self.running and not self.logged_in and not self.backend_state:
+            return "Tailscale is installed but its service isn't running — start Tailscale to use VPN peers."
+        if not self.logged_in:
+            return "Tailscale is installed but not signed in — run 'tailscale up' to use VPN peers."
+        if not self.running:
+            return f"Tailscale is signed in but not connected (state: {self.backend_state})."
+        return ""  # running and logged in — nothing to nag about
 
 
 def announce_peer(
@@ -218,7 +239,12 @@ def local_reachable_addresses(
 
 
 def tailscale_status(timeout: float = 2.0) -> dict[str, Any] | None:
-    """Parsed ``tailscale status --json``, or None if the CLI is absent/failing."""
+    """Parsed ``tailscale status --json``, or None if the CLI is absent/failing.
+
+    The JSON is parsed even when the CLI exits non-zero (it does that when logged
+    out, while still printing a status document with ``BackendState`` set), so
+    callers can tell "not signed in" apart from "not installed".
+    """
     executable = shutil.which("tailscale")
     if executable is None:
         return None
@@ -231,13 +257,34 @@ def tailscale_status(timeout: float = 2.0) -> dict[str, Any] | None:
         )
     except (OSError, subprocess.SubprocessError):
         return None
-    if completed.returncode != 0 or not completed.stdout.strip():
+    output = completed.stdout.strip()
+    if not output:
         return None
     try:
-        payload = json.loads(completed.stdout)
+        payload = json.loads(output)
     except json.JSONDecodeError:
         return None
     return payload if isinstance(payload, dict) else None
+
+
+def tailscale_state(status: dict[str, Any] | None = None) -> TailscaleState:
+    """Report whether Tailscale is installed, running, and signed in.
+
+    Each user signs in to their own tailnet (``tailscale up``); SecureLink can't
+    do that for them, so this lets the UI nudge them when credentials are missing.
+    """
+    installed = shutil.which("tailscale") is not None
+    if not installed:
+        return TailscaleState(False, False, False, "", None)
+    data = status if status is not None else tailscale_status()
+    if not data:
+        # CLI present but no parseable status (daemon stopped, perms, etc.).
+        return TailscaleState(True, False, False, "", None)
+    backend = str(data.get("BackendState") or "")
+    self_ip = _first_ipv4(_tailscale_self_addresses(data))
+    running = backend == "Running"
+    logged_in = backend not in {"", "NeedsLogin", "NoState", "NoTailnet"}
+    return TailscaleState(True, running, logged_in, backend, self_ip)
 
 
 def _first_ipv4(addresses: list[str]) -> str | None:

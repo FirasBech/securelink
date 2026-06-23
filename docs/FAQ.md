@@ -57,11 +57,23 @@ Two ways:
   (`wan_connect`) but is not yet wired into the one-click send/receive flow, and
   there is no relay for symmetric NATs.
 
+### Do I need a Tailscale account to use VPN mode?
+
+Yes — Tailscale is a separate product with its own sign-in. **Each user installs
+Tailscale and runs `tailscale up` once** to log in to their tailnet; SecureLink
+can't do that for you (it never sees your Tailscale credentials). Once you're
+signed in, SecureLink reads `tailscale status` to list your tailnet peers and
+detect your `100.x` address. If Tailscale is installed but you're not signed in,
+the dashboard shows a reminder to run `tailscale up`. (WireGuard works too — set
+up the tunnel yourself, then just use the peer's tunnel IP; no SecureLink
+integration needed.)
+
 ### Do I need to open ports or change my firewall?
 
 For LAN/VLAN, usually no (same network). To **receive** from another network you
 need that port reachable through your router/firewall (default 55000). The sender
-needs no inbound ports.
+needs no inbound ports. Over a VPN you don't need to open anything — the VPN
+carries the connection.
 
 ### Where are my keys and logs stored?
 

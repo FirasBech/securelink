@@ -4,11 +4,19 @@ import json
 import sys
 import threading
 import time
+import traceback
 from datetime import date
 from pathlib import Path
 from typing import Any
 
-from PyQt5.QtCore import Qt, QTimer, QUrl, pyqtSignal
+from PyQt5.QtCore import (
+    QEasingCurve,
+    QPropertyAnimation,
+    Qt,
+    QTimer,
+    QUrl,
+    pyqtSignal,
+)
 from PyQt5.QtGui import QColor, QDesktopServices, QFont, QIcon
 from PyQt5.QtWidgets import (
     QApplication,
@@ -17,6 +25,7 @@ from PyQt5.QtWidgets import (
     QDialog,
     QFileDialog,
     QFrame,
+    QGraphicsOpacityEffect,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
@@ -27,6 +36,7 @@ from PyQt5.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QSplitter,
     QTableWidget,
@@ -41,6 +51,7 @@ from core.discovery import (
     discover_peers,
     local_reachable_addresses,
     tailscale_peers,
+    tailscale_state,
 )
 from core.transport import TransportConfig, receive_file, send_file
 from core.udp_transport import udp_receive_file, udp_send_file
@@ -130,6 +141,7 @@ def _severity_for_event(payload: dict[str, Any]) -> str:
 class DashboardWindow(QMainWindow):
     peers_loaded = pyqtSignal(object)
     local_addresses_loaded = pyqtSignal(object)
+    tailscale_state_loaded = pyqtSignal(object)
     logs_loaded = pyqtSignal(object, object)
     status_changed = pyqtSignal(str)
     transfer_finished = pyqtSignal(str, int, int)
@@ -159,7 +171,9 @@ class DashboardWindow(QMainWindow):
             self.setWindowIcon(QIcon(str(ICON_PATH)))
         self._build_menu()
         self.resize(1480, 920)
-        self.setMinimumSize(1240, 780)
+        # Keep the minimum modest so the window fits smaller laptop screens;
+        # the panels live in scroll areas and adapt instead of being clipped.
+        self.setMinimumSize(900, 600)
         self._apply_styles()
 
         central_widget = QWidget(self)
@@ -196,14 +210,14 @@ class DashboardWindow(QMainWindow):
         splitter = QSplitter(Qt.Horizontal, central_widget)
         splitter.setChildrenCollapsible(False)
 
-        left_panel = QWidget(splitter)
+        left_panel = QWidget()
         left_layout = QVBoxLayout(left_panel)
-        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setContentsMargins(2, 2, 2, 2)
         left_layout.setSpacing(12)
 
-        right_panel = QWidget(splitter)
+        right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
-        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setContentsMargins(2, 2, 2, 2)
         right_layout.setSpacing(12)
 
         self._build_transfer_panel(left_layout)
@@ -212,8 +226,8 @@ class DashboardWindow(QMainWindow):
         self._build_log_panel(right_layout)
         self._build_alert_panel(right_layout)
 
-        splitter.addWidget(left_panel)
-        splitter.addWidget(right_panel)
+        splitter.addWidget(self._scrollable(left_panel))
+        splitter.addWidget(self._scrollable(right_panel))
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 2)
 
@@ -221,6 +235,60 @@ class DashboardWindow(QMainWindow):
         root_layout.addWidget(splitter)
 
         self.statusBar().showMessage("Ready")
+
+    def _scrollable(self, content: QWidget) -> QScrollArea:
+        """Wrap a panel column so it scrolls instead of clipping on small screens."""
+        area = QScrollArea()
+        area.setObjectName("PanelScroll")
+        area.setWidgetResizable(True)
+        area.setFrameShape(QFrame.NoFrame)
+        area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        area.setWidget(content)
+        return area
+
+    def showEvent(self, event) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        # Gentle fade-in the first time the window appears.
+        if not getattr(self, "_did_fade_in", False):
+            self._did_fade_in = True
+            self.setWindowOpacity(0.0)
+            fade = QPropertyAnimation(self, b"windowOpacity", self)
+            fade.setDuration(280)
+            fade.setStartValue(0.0)
+            fade.setEndValue(1.0)
+            fade.setEasingCurve(QEasingCurve.OutCubic)
+            fade.finished.connect(lambda: self.setWindowOpacity(1.0))
+            fade.start()
+            self._fade_anim = fade  # keep a reference so it isn't GC'd
+            # Fail-safe: if animations are disabled or never tick, make sure the
+            # window can never get stuck invisible.
+            QTimer.singleShot(450, lambda: self.setWindowOpacity(1.0))
+
+    def _start_pulse(self, widget: QWidget) -> None:
+        """Loop a soft opacity pulse on a widget to signal ongoing activity."""
+        anims = getattr(self, "_pulse_anims", None)
+        if anims is None:
+            anims = self._pulse_anims = {}
+        if widget in anims:
+            return
+        effect = QGraphicsOpacityEffect(widget)
+        widget.setGraphicsEffect(effect)
+        anim = QPropertyAnimation(effect, b"opacity", self)
+        anim.setDuration(1000)
+        anim.setStartValue(1.0)
+        anim.setKeyValueAt(0.5, 0.35)
+        anim.setEndValue(1.0)
+        anim.setLoopCount(-1)
+        anim.start()
+        anims[widget] = (anim, effect)
+
+    def _stop_pulse(self, widget: QWidget) -> None:
+        anims = getattr(self, "_pulse_anims", None) or {}
+        entry = anims.pop(widget, None)
+        if entry is not None:
+            anim, _effect = entry
+            anim.stop()
+        widget.setGraphicsEffect(None)
 
     def _build_menu(self) -> None:
         help_menu = self.menuBar().addMenu("&Help")
@@ -308,6 +376,22 @@ class DashboardWindow(QMainWindow):
                 color: #94a3b8;
                 font-size: 12px;
                 font-weight: 400;
+            }
+            QLabel#TailscaleHint {
+                color: #fbbf24;
+                font-size: 12px;
+                font-weight: 600;
+                padding: 6px 8px;
+                background: #422006;
+                border: 1px solid #854d0e;
+                border-radius: 8px;
+            }
+            QScrollArea#PanelScroll {
+                background: transparent;
+                border: none;
+            }
+            QScrollArea#PanelScroll > QWidget > QWidget {
+                background: transparent;
             }
             QGroupBox {
                 background: #1e293b;
@@ -471,6 +555,7 @@ class DashboardWindow(QMainWindow):
     def _connect_signals(self) -> None:
         self.peers_loaded.connect(self._render_peers)
         self.local_addresses_loaded.connect(self._render_local_addresses)
+        self.tailscale_state_loaded.connect(self._render_tailscale_state)
         self.logs_loaded.connect(self._render_logs)
         self.status_changed.connect(self._set_status)
         self.transfer_finished.connect(self._on_transfer_finished)
@@ -723,6 +808,7 @@ class DashboardWindow(QMainWindow):
         self.receive_status_label.setText(
             f"Listening on :{config.port} ({config.mode.upper()})..."
         )
+        self._start_pulse(self.receive_status_label)
         self.status_changed.emit(f"Listening for a file on :{config.port}")
 
         def _worker() -> None:
@@ -740,6 +826,7 @@ class DashboardWindow(QMainWindow):
         self._receive_thread.start()
 
     def _reset_receive_button(self) -> None:
+        self._stop_pulse(self.receive_status_label)
         self.receive_button.setText("Start Listening")
         self.receive_button.setEnabled(True)
 
@@ -785,8 +872,15 @@ class DashboardWindow(QMainWindow):
         self.network_hint_label.setObjectName("PanelHint")
         self.network_hint_label.setWordWrap(True)
 
+        # Surfaces Tailscale credential/login state (each user must sign in once).
+        self.tailscale_hint_label = QLabel()
+        self.tailscale_hint_label.setObjectName("TailscaleHint")
+        self.tailscale_hint_label.setWordWrap(True)
+        self.tailscale_hint_label.setVisible(False)
+
         layout.addWidget(self.network_table)
         layout.addWidget(self.network_hint_label)
+        layout.addWidget(self.tailscale_hint_label)
         parent_layout.addWidget(group, stretch=1)
 
     def _build_log_panel(self, parent_layout: QVBoxLayout) -> None:
@@ -867,10 +961,14 @@ class DashboardWindow(QMainWindow):
                 peer_records = [dict(vars(peer)) for peer in discover_peers()]
             except Exception as exc:
                 self.status_changed.emit(f"Peer discovery unavailable: {exc}")
-            # Tailscale peers (best-effort: empty unless the CLI is installed).
+            # Tailscale (best-effort): one status read shared by peers + login check.
+            ts_status = None
             try:
+                from core.discovery import tailscale_status
+
+                ts_status = tailscale_status()
                 seen = {record.get("address") for record in peer_records}
-                for peer in tailscale_peers(port=assumed_port):
+                for peer in tailscale_peers(port=assumed_port, status=ts_status):
                     if peer.address not in seen:
                         peer_records.append(dict(vars(peer)))
                         seen.add(peer.address)
@@ -883,8 +981,19 @@ class DashboardWindow(QMainWindow):
                 )
             except Exception:
                 pass
+            try:
+                self.tailscale_state_loaded.emit(
+                    {"summary": tailscale_state(status=ts_status).summary()}
+                )
+            except Exception:
+                pass
 
         threading.Thread(target=_worker, daemon=True).start()
+
+    def _render_tailscale_state(self, payload: object) -> None:
+        summary = str(payload.get("summary") or "") if isinstance(payload, dict) else ""
+        self.tailscale_hint_label.setText(summary)
+        self.tailscale_hint_label.setVisible(bool(summary))
 
     def _render_local_addresses(self, payload: object) -> None:
         addresses = payload if isinstance(payload, list) else []
@@ -1082,6 +1191,7 @@ class DashboardWindow(QMainWindow):
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
         self.transfer_detail_label.setText("Sending...")
+        self._start_pulse(self.transfer_detail_label)
         self.status_changed.emit(f"Sending {Path(file_path).name} in {mode.upper()} mode...")
         self._transfer_start = time.monotonic()
 
@@ -1125,6 +1235,7 @@ class DashboardWindow(QMainWindow):
         return auto_select_transport_mode(vlan_id=vlan_id, peer_address=peer_host)
 
     def _on_transfer_finished(self, file_path: str, bytes_sent: int, chunks: int) -> None:
+        self._stop_pulse(self.transfer_detail_label)
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(100)
         self.transfer_detail_label.setText(
@@ -1134,6 +1245,7 @@ class DashboardWindow(QMainWindow):
         self.refresh_logs()
 
     def _on_transfer_failed(self, message: str) -> None:
+        self._stop_pulse(self.transfer_detail_label)
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
         self.transfer_detail_label.setText("Transfer failed")
@@ -1167,8 +1279,35 @@ class DashboardWindow(QMainWindow):
 DashboardApp = DashboardWindow
 
 
+def _install_exception_guard() -> None:
+    """Keep the GUI alive when a slot raises.
+
+    PyQt aborts the whole process on an uncaught exception in a slot — under
+    ``pythonw`` that looks like a silent crash. Logging instead of aborting turns
+    an edge-case bug into a survivable, diagnosable error.
+    """
+
+    def report(exc_type: type, exc: BaseException, tb: Any) -> None:
+        message = "".join(traceback.format_exception(exc_type, exc, tb))
+        sys.stderr.write(message)
+        try:
+            log_path = Path.home() / ".securelink" / "logs" / "ui-errors.log"
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            with log_path.open("a", encoding="utf-8") as handle:
+                handle.write(f"{date.today().isoformat()} {message}\n")
+        except OSError:
+            pass
+
+    sys.excepthook = report
+    if hasattr(threading, "excepthook"):
+        threading.excepthook = lambda args: report(
+            args.exc_type, args.exc_value, args.exc_traceback
+        )
+
+
 def launch_dashboard() -> int:
     _claim_taskbar_identity()
+    _install_exception_guard()
 
     app = QApplication.instance()
     owns_app = app is None

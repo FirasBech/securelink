@@ -120,3 +120,37 @@ def test_tailscale_self_addresses_from_status() -> None:
         "100.64.0.10",
         "fd7a:115c:a1e0::a",
     ]
+
+
+def test_tailscale_state_not_installed(monkeypatch) -> None:
+    monkeypatch.setattr(discovery.shutil, "which", lambda _name: None)
+    state = discovery.tailscale_state()
+    assert state.installed is False
+    assert state.summary() == ""
+
+
+def test_tailscale_state_logged_out(monkeypatch) -> None:
+    monkeypatch.setattr(discovery.shutil, "which", lambda _name: "/usr/bin/tailscale")
+    state = discovery.tailscale_state(status={"BackendState": "NeedsLogin"})
+    assert state.installed is True
+    assert state.logged_in is False
+    assert "tailscale up" in state.summary()
+
+
+def test_tailscale_state_running_is_quiet(monkeypatch) -> None:
+    monkeypatch.setattr(discovery.shutil, "which", lambda _name: "/usr/bin/tailscale")
+    running = {**_FAKE_STATUS, "BackendState": "Running"}
+    state = discovery.tailscale_state(status=running)
+    assert state.running is True
+    assert state.logged_in is True
+    assert state.self_ip == "100.64.0.10"
+    assert state.summary() == ""  # nothing to nag about
+
+
+def test_tailscale_state_daemon_down(monkeypatch) -> None:
+    monkeypatch.setattr(discovery.shutil, "which", lambda _name: "/usr/bin/tailscale")
+    monkeypatch.setattr(discovery, "tailscale_status", lambda *a, **k: None)
+    state = discovery.tailscale_state()
+    assert state.installed is True
+    assert state.running is False
+    assert "isn't running" in state.summary()

@@ -66,6 +66,29 @@ def test_dashboard_friendly_ux() -> None:
         app.quit()
 
 
+def test_dashboard_tailscale_hint_and_pulse() -> None:
+    app = QApplication.instance() or QApplication([])
+    window = DashboardWindow(auto_refresh=False)
+
+    # The Tailscale login nudge shows only when there is something to say.
+    window._render_tailscale_state({"summary": ""})
+    assert window.tailscale_hint_label.isHidden()
+    window._render_tailscale_state({"summary": "run 'tailscale up' to use VPN peers."})
+    assert not window.tailscale_hint_label.isHidden()
+    assert "tailscale up" in window.tailscale_hint_label.text()
+
+    # The activity pulse starts/stops cleanly and is idempotent.
+    window._start_pulse(window.transfer_detail_label)
+    window._start_pulse(window.transfer_detail_label)
+    window._stop_pulse(window.transfer_detail_label)
+    window._stop_pulse(window.transfer_detail_label)
+
+    window.close()
+    window.deleteLater()
+    if app is not None:
+        app.quit()
+
+
 def test_dashboard_vpn_mode_and_local_addresses() -> None:
     app = QApplication.instance() or QApplication([])
     window = DashboardWindow(auto_refresh=False)

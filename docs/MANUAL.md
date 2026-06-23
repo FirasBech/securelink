@@ -125,7 +125,9 @@ explanation.
   Tailscale CLI is installed, your tailnet peers too (the **Source** column reads
   `mdns` or `tailscale`). Click one to fill the send fields. Tailscale peers
   assume the default port, since Tailscale can't know if/where SecureLink is
-  listening — adjust the port if needed.
+  listening — adjust the port if needed. Tailscale requires its own sign-in: each
+  user runs `tailscale up` once. If it's installed but you're not signed in, an
+  amber reminder appears here.
 - **Activity Log** shows every event; use the filter box and **Alerts only**
   toggle to narrow it. The summary reads "shown / total events".
 - **Security Alerts** panel lists security alerts, color-coded by severity (HIGH = red,
