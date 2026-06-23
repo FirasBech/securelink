@@ -89,15 +89,17 @@ Everything per-user is under `~/.securelink/`:
 
 ![The SecureLink dashboard](screenshots/dashboard.png)
 
-The window has a **Transfer** and **Receive** panel on the left, and the
-**Network Map**, **Live Log**, and **Alert** panels on the right.
+The window has a **Send a File** and **Receive a File** panel on the left, and
+the **Devices on Your Network**, **Activity Log**, and **Security Alerts**
+panels on the right. Each input has a tooltip — hover over it for a plain-English
+explanation.
 
 ### Send a file
 
-1. **Transfer panel → File:** click *Browse* and choose a file.
-2. **Peer:** pick a discovered peer from the dropdown / Network Map, or type the
-   host/IP and port directly.
-3. **Mode:** leave on *Auto*, or force *LAN / VLAN / WAN*.
+1. **Send a File → File:** click *Browse* and choose a file.
+2. **Device / Address:** pick a discovered device from the dropdown / *Devices on
+   Your Network* list, or type the address and port directly.
+3. **Mode:** leave on *Auto*, or force *LAN / VLAN / VPN / WAN*.
 4. The first time you send to a new device, tick **Allow unknown devices** (the
    GUI has no console for the interactive trust prompt — ticking this records the
    peer's fingerprint and proceeds).
@@ -106,7 +108,7 @@ The window has a **Transfer** and **Receive** panel on the left, and the
 
 ### Receive a file
 
-1. **Receive panel → Port:** the port to listen on (default 55000).
+1. **Receive a File → Port:** the port to listen on (default 55000).
 2. **Save to:** the download directory (*Browse* to pick one).
 3. Optionally set an **Allowlist** (comma-separated IPs/CIDRs) and tick **WAN**
    for reliable-UDP transfers or **Allow unknown devices** for a first contact.
@@ -119,14 +121,14 @@ The window has a **Transfer** and **Receive** panel on the left, and the
 
 ### Monitor
 
-- **Network Map** lists LAN peers found via mDNS — and, if the Tailscale CLI is
-  installed, your tailnet peers too (the **Source** column reads `mdns` or
-  `tailscale`). Selecting one fills the send fields. Tailscale peers assume the
-  default port, since Tailscale can't know if/where SecureLink is listening —
-  adjust the port if needed.
-- **Live Log** shows every event; use the filter box and **Alerts only** toggle
-  to narrow it. The summary reads "shown / total events".
-- **Alert** panel lists security alerts, color-coded by severity (HIGH = red,
+- **Devices on Your Network** lists LAN peers found via mDNS — and, if the
+  Tailscale CLI is installed, your tailnet peers too (the **Source** column reads
+  `mdns` or `tailscale`). Click one to fill the send fields. Tailscale peers
+  assume the default port, since Tailscale can't know if/where SecureLink is
+  listening — adjust the port if needed.
+- **Activity Log** shows every event; use the filter box and **Alerts only**
+  toggle to narrow it. The summary reads "shown / total events".
+- **Security Alerts** panel lists security alerts, color-coded by severity (HIGH = red,
   MEDIUM = amber).
 
 ---
@@ -171,7 +173,7 @@ python -m ui.cli logs --alerts-only
 ## 6. Security monitoring
 
 When run with packet-capture privileges, the guards watch traffic and write
-findings to the JSON log (and the dashboard's Alert panel):
+findings to the JSON log (and the dashboard's Security Alerts panel):
 
 - **ARP guard** — flags a host whose MAC address changes (possible ARP
   spoofing). Severity HIGH.
@@ -192,7 +194,7 @@ do not produce these events, and transfers still work.
 | Transfer fails immediately in the GUI on a new peer | Tick **Allow unknown devices** the first time (no console for the trust prompt). |
 | `Connection refused` when sending | The receiver isn't listening, wrong IP/port, or a firewall is blocking the port. |
 | `address already in use` when receiving | Another process holds that port; pick a different `--port`. |
-| Peer doesn't appear in the Network Map | mDNS may be blocked on the network; type the IP and port manually. |
+| Device doesn't appear in *Devices on Your Network* | mDNS may be blocked on the network; type the IP and port manually. |
 | WAN transfer to an internet peer times out | The receiver's UDP port must be reachable (port-forwarded). NAT hole punching is available programmatically (`core.nat.wan_connect`) but not yet wired into the one-click send. |
 | No ARP/TTL/VLAN alerts ever appear | Packet capture needs admin/root (and Npcap on Windows); without it the guards stay quiet by design. |
 | Shortcut still shows the old/default icon | Windows caches icons — sign out and back in, or restart Explorer. |

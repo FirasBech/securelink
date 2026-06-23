@@ -41,6 +41,31 @@ def test_dashboard_window_initializes_offscreen() -> None:
         app.quit()
 
 
+def test_dashboard_friendly_ux() -> None:
+    app = QApplication.instance() or QApplication([])
+    window = DashboardWindow(auto_refresh=False)
+
+    # Primary actions are styled as primary; key inputs carry tooltips.
+    assert window.send_button.objectName() == "PrimaryButton"
+    assert window.receive_button.objectName() == "PrimaryButton"
+    assert window.peer_host_edit.toolTip()
+    assert window.mode_combo.toolTip()
+    assert window.recv_port_spin.toolTip()
+
+    # The device table shows an empty-state hint until peers are found,
+    # then hides it. (isHidden reflects the explicit setVisible state even
+    # though the offscreen window is never shown.)
+    window._render_network_table([])
+    assert not window.network_hint_label.isHidden()
+    window._render_network_table([{"name": "host", "address": "192.168.1.9", "port": 55000}])
+    assert window.network_hint_label.isHidden()
+
+    window.close()
+    window.deleteLater()
+    if app is not None:
+        app.quit()
+
+
 def test_dashboard_vpn_mode_and_local_addresses() -> None:
     app = QApplication.instance() or QApplication([])
     window = DashboardWindow(auto_refresh=False)

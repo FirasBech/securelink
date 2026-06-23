@@ -26,12 +26,12 @@ The app auto-selects a mode, or you can force one.
 Both sides run SecureLink. The receiver clicks **Start Listening** (or runs
 `recv`); the sender chooses the file and the receiver's IP/port and clicks
 **Send File** (or runs `send <file> <ip>`). On the same LAN, the sender can pick
-the receiver from the Network Map instead of typing the address.
+the receiver from the *Devices on Your Network* list instead of typing the address.
 
 ### Where are received files saved?
 
-Wherever you set **Save to** in the Receive panel (or `--output-dir` on the CLI).
-The default is the current folder.
+Wherever you set **Save to** in the *Receive a File* panel (or `--output-dir` on
+the CLI). The default is the current folder.
 
 ### What does "Trust this device?" / "Allow unknown devices" mean?
 
@@ -48,7 +48,7 @@ Two ways:
 - **Over a VPN (easiest).** If both machines are on the same VPN — Tailscale,
   WireGuard, etc. — they see each other on a stable private link, so SecureLink
   uses **direct TCP** and skips NAT traversal entirely. Just use the peer's VPN
-  address (the Receive panel's **Your address** shows yours). Tailscale's
+  address (the *Receive a File* panel's **Your address** shows yours). Tailscale's
   `100.64.x` range is auto-detected as VPN mode; WireGuard's private IPs route as
   LAN over the tunnel. This is the most reliable path today.
 - **Plain WAN.** Works **if the receiver's UDP port is reachable** (e.g.

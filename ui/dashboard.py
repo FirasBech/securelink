@@ -182,7 +182,7 @@ class DashboardWindow(QMainWindow):
         title.setObjectName("HeaderTitle")
 
         subtitle = QLabel(
-            "Cross-network file transfer dashboard with LAN and VLAN awareness"
+            "Send and receive files securely across LAN, VLAN, VPN, and WAN."
         )
         subtitle.setObjectName("HeaderSubtitle")
 
@@ -304,6 +304,11 @@ class DashboardWindow(QMainWindow):
                 color: #cbd5e1;
                 font-family: "Consolas", "Courier New", monospace;
             }
+            QLabel#PanelHint {
+                color: #94a3b8;
+                font-size: 12px;
+                font-weight: 400;
+            }
             QGroupBox {
                 background: #1e293b;
                 border: 1px solid #334155;
@@ -340,20 +345,35 @@ class DashboardWindow(QMainWindow):
                 spacing: 6px;
             }
             QPushButton {
-                background: #2563eb;
-                color: #ffffff;
+                background: #334155;
+                color: #e2e8f0;
                 border: none;
                 border-radius: 8px;
                 padding: 8px 14px;
                 font-weight: 600;
             }
             QPushButton:hover {
-                background: #3b82f6;
+                background: #475569;
             }
             QPushButton:pressed {
-                background: #1d4ed8;
+                background: #1e293b;
             }
             QPushButton:disabled {
+                background: #1e293b;
+                color: #64748b;
+            }
+            QPushButton#PrimaryButton {
+                background: #2563eb;
+                color: #ffffff;
+                padding: 9px 18px;
+            }
+            QPushButton#PrimaryButton:hover {
+                background: #3b82f6;
+            }
+            QPushButton#PrimaryButton:pressed {
+                background: #1d4ed8;
+            }
+            QPushButton#PrimaryButton:disabled {
                 background: #334155;
                 color: #64748b;
             }
@@ -460,8 +480,17 @@ class DashboardWindow(QMainWindow):
         self.receive_failed.connect(self._on_receive_failed)
 
     def _build_transfer_panel(self, parent_layout: QVBoxLayout) -> None:
-        group = QGroupBox("Transfer Panel")
-        grid = QGridLayout(group)
+        group = QGroupBox("Send a File")
+        outer = QVBoxLayout(group)
+        outer.setContentsMargins(12, 12, 12, 12)
+        outer.setSpacing(10)
+
+        hint = QLabel("1. Pick a file   2. Choose a device or type its address   3. Send File")
+        hint.setObjectName("PanelHint")
+        hint.setWordWrap(True)
+        outer.addWidget(hint)
+
+        grid = QGridLayout()
         grid.setHorizontalSpacing(10)
         grid.setVerticalSpacing(10)
         grid.setColumnStretch(1, 1)
@@ -469,39 +498,66 @@ class DashboardWindow(QMainWindow):
 
         self.file_edit = QLineEdit()
         self.file_edit.setPlaceholderText("Choose a file to send")
+        self.file_edit.setToolTip("The file you want to send.")
         browse_button = QPushButton("Browse")
         browse_button.clicked.connect(self.choose_file)
+        browse_button.setToolTip("Pick the file to send.")
 
         self.peer_selector = QComboBox()
         self.peer_selector.currentIndexChanged.connect(self._apply_selected_peer)
         self.peer_selector.setPlaceholderText("Discover peers")
+        self.peer_selector.setToolTip(
+            "Devices found on your network. Pick one to fill in its address automatically."
+        )
 
         self.peer_host_edit = QLineEdit()
-        self.peer_host_edit.setPlaceholderText("Peer host or IP")
+        self.peer_host_edit.setPlaceholderText("e.g. 192.168.1.20 or a 100.x VPN address")
+        self.peer_host_edit.setToolTip(
+            "The receiver's IP address or hostname. On the same Wi-Fi/LAN use their "
+            "192.168.x address; on a VPN use their 100.x (Tailscale) address."
+        )
 
         self.peer_port_spin = QSpinBox()
         self.peer_port_spin.setRange(1, 65535)
         self.peer_port_spin.setValue(55000)
+        self.peer_port_spin.setToolTip("The port the receiver is listening on (default 55000).")
 
         self.mode_combo = QComboBox()
         self.mode_combo.addItems(["Auto", "LAN", "VLAN", "WAN", "VPN"])
+        self.mode_combo.setToolTip(
+            "How to reach the peer. Leave on Auto unless you know you need a specific "
+            "mode: LAN/VLAN/VPN use direct TCP, WAN uses reliable UDP across the internet."
+        )
 
         self.mtu_spin = QSpinBox()
         self.mtu_spin.setRange(576, 9000)
         self.mtu_spin.setValue(1500)
+        self.mtu_spin.setToolTip(
+            "Advanced: largest packet size in bytes. Leave at 1500 for normal networks."
+        )
 
         self.vlan_spin = QSpinBox()
         self.vlan_spin.setRange(0, 4094)
         self.vlan_spin.setValue(0)
         self.vlan_spin.setSpecialValueText("None")
+        self.vlan_spin.setToolTip(
+            "Advanced: tag the transfer with a VLAN id for policy checks. Leave as None."
+        )
 
         self.allow_unknown_checkbox = QCheckBox("Allow unknown devices")
+        self.allow_unknown_checkbox.setToolTip(
+            "Tick this the first time you connect to a new device to trust its identity. "
+            "After that it's remembered, and a changed identity is refused."
+        )
 
         self.refresh_peers_button = QPushButton("Refresh Peers")
         self.refresh_peers_button.clicked.connect(self.refresh_peers)
+        self.refresh_peers_button.setToolTip("Search the network again for devices.")
 
         self.send_button = QPushButton("Send File")
+        self.send_button.setObjectName("PrimaryButton")
         self.send_button.clicked.connect(self.send_selected_file)
+        self.send_button.setToolTip("Encrypt and send the chosen file to the peer.")
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 100)
@@ -513,10 +569,10 @@ class DashboardWindow(QMainWindow):
         grid.addWidget(self.file_edit, 0, 1, 1, 2)
         grid.addWidget(browse_button, 0, 3)
 
-        grid.addWidget(QLabel("Discovered peer"), 1, 0)
+        grid.addWidget(QLabel("Device"), 1, 0)
         grid.addWidget(self.peer_selector, 1, 1, 1, 3)
 
-        grid.addWidget(QLabel("Peer host"), 2, 0)
+        grid.addWidget(QLabel("Address"), 2, 0)
         grid.addWidget(self.peer_host_edit, 2, 1)
         grid.addWidget(QLabel("Port"), 2, 2)
         grid.addWidget(self.peer_port_spin, 2, 3)
@@ -539,11 +595,21 @@ class DashboardWindow(QMainWindow):
         grid.addWidget(self.progress_bar, 6, 0, 1, 3)
         grid.addWidget(self.transfer_detail_label, 6, 3)
 
+        outer.addLayout(grid)
         parent_layout.addWidget(group)
 
     def _build_receive_panel(self, parent_layout: QVBoxLayout) -> None:
-        group = QGroupBox("Receive Panel")
-        grid = QGridLayout(group)
+        group = QGroupBox("Receive a File")
+        outer = QVBoxLayout(group)
+        outer.setContentsMargins(12, 12, 12, 12)
+        outer.setSpacing(10)
+
+        hint = QLabel("Click Start Listening, then give the sender your address shown below.")
+        hint.setObjectName("PanelHint")
+        hint.setWordWrap(True)
+        outer.addWidget(hint)
+
+        grid = QGridLayout()
         grid.setHorizontalSpacing(10)
         grid.setVerticalSpacing(10)
         grid.setColumnStretch(1, 1)
@@ -551,20 +617,38 @@ class DashboardWindow(QMainWindow):
         self.recv_port_spin = QSpinBox()
         self.recv_port_spin.setRange(1, 65535)
         self.recv_port_spin.setValue(55000)
+        self.recv_port_spin.setToolTip(
+            "The port to listen on. Tell the sender to use this same port (default 55000)."
+        )
 
         self.recv_wan_checkbox = QCheckBox("WAN (reliable UDP)")
+        self.recv_wan_checkbox.setToolTip(
+            "Tick this only if the sender is connecting over the internet (WAN). "
+            "Leave unticked for the same network or a VPN."
+        )
 
         self.recv_output_edit = QLineEdit(str(Path.cwd()))
+        self.recv_output_edit.setToolTip("Folder where received files are saved.")
         recv_browse_button = QPushButton("Browse")
         recv_browse_button.clicked.connect(self.choose_output_dir)
+        recv_browse_button.setToolTip("Choose the download folder.")
 
         self.recv_allowlist_edit = QLineEdit()
         self.recv_allowlist_edit.setPlaceholderText("Allowlist, e.g. 192.168.1.0/24, 10.0.0.5")
+        self.recv_allowlist_edit.setToolTip(
+            "Optional: only accept connections from these IPs or subnets (comma-separated). "
+            "Leave empty to accept any."
+        )
 
         self.recv_allow_unknown_checkbox = QCheckBox("Allow unknown devices")
+        self.recv_allow_unknown_checkbox.setToolTip(
+            "Tick this for a first-time sender to trust its identity (remembered afterwards)."
+        )
 
         self.receive_button = QPushButton("Start Listening")
+        self.receive_button.setObjectName("PrimaryButton")
         self.receive_button.clicked.connect(self.toggle_receiving)
+        self.receive_button.setToolTip("Start listening for one incoming file.")
 
         self.receive_status_label = QLabel("Idle")
         self.receive_status_label.setObjectName("ReceiveStatus")
@@ -598,6 +682,7 @@ class DashboardWindow(QMainWindow):
         button_row.addWidget(self.receive_status_label, 1)
         grid.addLayout(button_row, 4, 0, 1, 4)
 
+        outer.addLayout(grid)
         parent_layout.addWidget(group)
 
     def choose_output_dir(self) -> None:
@@ -678,7 +763,7 @@ class DashboardWindow(QMainWindow):
         QMessageBox.critical(self, "SecureLink", message)
 
     def _build_network_panel(self, parent_layout: QVBoxLayout) -> None:
-        group = QGroupBox("Network Map")
+        group = QGroupBox("Devices on Your Network")
         layout = QVBoxLayout(group)
         layout.setContentsMargins(10, 10, 10, 10)
 
@@ -692,24 +777,35 @@ class DashboardWindow(QMainWindow):
         self.network_table.verticalHeader().setVisible(False)
         self.network_table.horizontalHeader().setStretchLastSection(True)
         self.network_table.itemSelectionChanged.connect(self._apply_selected_network_row)
+        self.network_table.setToolTip("Click a device to fill in its address in the Send panel above.")
+
+        self.network_hint_label = QLabel(
+            "No devices found yet. Click Refresh Peers, or just type the address in the Send panel."
+        )
+        self.network_hint_label.setObjectName("PanelHint")
+        self.network_hint_label.setWordWrap(True)
 
         layout.addWidget(self.network_table)
+        layout.addWidget(self.network_hint_label)
         parent_layout.addWidget(group, stretch=1)
 
     def _build_log_panel(self, parent_layout: QVBoxLayout) -> None:
-        group = QGroupBox("Live Log Panel")
+        group = QGroupBox("Activity Log")
         layout = QVBoxLayout(group)
         layout.setContentsMargins(10, 10, 10, 10)
 
         header_row = QHBoxLayout()
         self.log_refresh_button = QPushButton("Refresh Logs")
         self.log_refresh_button.clicked.connect(self.refresh_logs)
+        self.log_refresh_button.setToolTip("Reload today's activity log.")
         self.log_search_edit = QLineEdit()
         self.log_search_edit.setPlaceholderText("Filter logs…")
         self.log_search_edit.setClearButtonEnabled(True)
         self.log_search_edit.textChanged.connect(self._apply_log_filter)
+        self.log_search_edit.setToolTip("Type to show only log rows containing this text.")
         self.log_alerts_only_checkbox = QCheckBox("Alerts only")
         self.log_alerts_only_checkbox.stateChanged.connect(self._apply_log_filter)
+        self.log_alerts_only_checkbox.setToolTip("Show only security alerts.")
         self.log_summary_label = QLabel("0 events, 0 alerts")
         self.log_summary_label.setObjectName("LogSummary")
         header_row.addWidget(self.log_refresh_button)
@@ -732,7 +828,7 @@ class DashboardWindow(QMainWindow):
         parent_layout.addWidget(group, stretch=2)
 
     def _build_alert_panel(self, parent_layout: QVBoxLayout) -> None:
-        group = QGroupBox("Alert Panel")
+        group = QGroupBox("Security Alerts")
         layout = QVBoxLayout(group)
         layout.setContentsMargins(10, 10, 10, 10)
 
@@ -823,6 +919,7 @@ class DashboardWindow(QMainWindow):
         self.statusBar().showMessage(f"Discovered {len(self._peers)} peer(s)")
 
     def _render_network_table(self, peers: list[dict[str, Any]]) -> None:
+        self.network_hint_label.setVisible(len(peers) == 0)
         self.network_table.setRowCount(len(peers))
         for row, peer in enumerate(peers):
             values = [
