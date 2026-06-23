@@ -39,3 +39,37 @@ def test_dashboard_window_initializes_offscreen() -> None:
 
     if app is not None:
         app.quit()
+
+
+def test_dashboard_vpn_mode_and_local_addresses() -> None:
+    app = QApplication.instance() or QApplication([])
+    window = DashboardWindow(auto_refresh=False)
+
+    # "VPN" is selectable and forces a direct (non-WAN) transfer.
+    assert "VPN" in [window.mode_combo.itemText(i) for i in range(window.mode_combo.count())]
+    window.mode_combo.setCurrentText("VPN")
+    assert window._resolve_transport_mode("100.64.0.5", None) == "vpn"
+
+    # Auto mode delegates to the shared selector: a Tailscale/CGNAT peer -> vpn,
+    # a public peer -> wan, a private peer -> lan.
+    window.mode_combo.setCurrentText("Auto")
+    assert window._resolve_transport_mode("100.101.0.9", None) == "vpn"
+    assert window._resolve_transport_mode("8.8.8.8", None) == "wan"
+    assert window._resolve_transport_mode("192.168.1.20", None) == "lan"
+
+    # The Receive panel surfaces shareable addresses, VPN labelled.
+    window._render_local_addresses(
+        [{"address": "100.64.0.7", "kind": "vpn"}, {"address": "192.168.1.20", "kind": "lan"}]
+    )
+    text = window.local_addr_label.text()
+    assert "100.64.0.7 (VPN)" in text
+    assert "192.168.1.20 (LAN)" in text
+
+    window._render_local_addresses([])
+    assert "No reachable address" in window.local_addr_label.text()
+
+    window.close()
+    window.deleteLater()
+
+    if app is not None:
+        app.quit()

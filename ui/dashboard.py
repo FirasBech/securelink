@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import ipaddress
 import json
 import sys
 import threading
@@ -37,7 +36,12 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from core.discovery import discover_peers
+from core.discovery import (
+    auto_select_transport_mode,
+    discover_peers,
+    local_reachable_addresses,
+    tailscale_peers,
+)
 from core.transport import TransportConfig, receive_file, send_file
 from core.udp_transport import udp_receive_file, udp_send_file
 
@@ -125,6 +129,7 @@ def _severity_for_event(payload: dict[str, Any]) -> str:
 
 class DashboardWindow(QMainWindow):
     peers_loaded = pyqtSignal(object)
+    local_addresses_loaded = pyqtSignal(object)
     logs_loaded = pyqtSignal(object, object)
     status_changed = pyqtSignal(str)
     transfer_finished = pyqtSignal(str, int, int)
@@ -295,6 +300,10 @@ class DashboardWindow(QMainWindow):
             QLabel#ReceiveStatus, QLabel#LogSummary, QLabel#AlertSummary {
                 color: #94a3b8;
             }
+            QLabel#LocalAddresses {
+                color: #cbd5e1;
+                font-family: "Consolas", "Courier New", monospace;
+            }
             QGroupBox {
                 background: #1e293b;
                 border: 1px solid #334155;
@@ -441,6 +450,7 @@ class DashboardWindow(QMainWindow):
 
     def _connect_signals(self) -> None:
         self.peers_loaded.connect(self._render_peers)
+        self.local_addresses_loaded.connect(self._render_local_addresses)
         self.logs_loaded.connect(self._render_logs)
         self.status_changed.connect(self._set_status)
         self.transfer_finished.connect(self._on_transfer_finished)
@@ -474,7 +484,7 @@ class DashboardWindow(QMainWindow):
         self.peer_port_spin.setValue(55000)
 
         self.mode_combo = QComboBox()
-        self.mode_combo.addItems(["Auto", "LAN", "VLAN", "WAN"])
+        self.mode_combo.addItems(["Auto", "LAN", "VLAN", "WAN", "VPN"])
 
         self.mtu_spin = QSpinBox()
         self.mtu_spin.setRange(576, 9000)
@@ -559,6 +569,15 @@ class DashboardWindow(QMainWindow):
         self.receive_status_label = QLabel("Idle")
         self.receive_status_label.setObjectName("ReceiveStatus")
 
+        self.local_addr_label = QLabel("Detecting addresses...")
+        self.local_addr_label.setObjectName("LocalAddresses")
+        self.local_addr_label.setWordWrap(True)
+        self.local_addr_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.local_addr_label.setToolTip(
+            "Addresses this machine is reachable on. Give one to the sender; "
+            "prefer the VPN address when both of you are on the same VPN."
+        )
+
         grid.addWidget(QLabel("Port"), 0, 0)
         grid.addWidget(self.recv_port_spin, 0, 1)
         grid.addWidget(self.recv_wan_checkbox, 0, 2, 1, 2)
@@ -571,10 +590,13 @@ class DashboardWindow(QMainWindow):
         grid.addWidget(self.recv_allowlist_edit, 2, 1)
         grid.addWidget(self.recv_allow_unknown_checkbox, 2, 2, 1, 2)
 
+        grid.addWidget(QLabel("Your address"), 3, 0)
+        grid.addWidget(self.local_addr_label, 3, 1, 1, 3)
+
         button_row = QHBoxLayout()
         button_row.addWidget(self.receive_button)
         button_row.addWidget(self.receive_status_label, 1)
-        grid.addLayout(button_row, 3, 0, 1, 4)
+        grid.addLayout(button_row, 4, 0, 1, 4)
 
         parent_layout.addWidget(group)
 
@@ -741,17 +763,45 @@ class DashboardWindow(QMainWindow):
 
     def refresh_peers(self) -> None:
         self.status_changed.emit("Discovering peers...")
+        assumed_port = self.peer_port_spin.value()
 
         def _worker() -> None:
+            peer_records: list[dict[str, Any]] = []
             try:
-                discovered = discover_peers()
-                peer_records = [dict(vars(peer)) for peer in discovered]
+                peer_records = [dict(vars(peer)) for peer in discover_peers()]
             except Exception as exc:
                 self.status_changed.emit(f"Peer discovery unavailable: {exc}")
-                return
+            # Tailscale peers (best-effort: empty unless the CLI is installed).
+            try:
+                seen = {record.get("address") for record in peer_records}
+                for peer in tailscale_peers(port=assumed_port):
+                    if peer.address not in seen:
+                        peer_records.append(dict(vars(peer)))
+                        seen.add(peer.address)
+            except Exception:
+                pass
             self.peers_loaded.emit(peer_records)
+            try:
+                self.local_addresses_loaded.emit(
+                    [dict(vars(addr)) for addr in local_reachable_addresses()]
+                )
+            except Exception:
+                pass
 
         threading.Thread(target=_worker, daemon=True).start()
+
+    def _render_local_addresses(self, payload: object) -> None:
+        addresses = payload if isinstance(payload, list) else []
+        if not addresses:
+            self.local_addr_label.setText("No reachable address detected")
+            return
+        labels = {"vpn": "VPN", "lan": "LAN", "public": "public"}
+        parts = [
+            f"{addr.get('address')} ({labels.get(addr.get('kind'), addr.get('kind'))})"
+            for addr in addresses
+            if addr.get("address")
+        ]
+        self.local_addr_label.setText("    ".join(parts))
 
     def _render_peers(self, peers: object) -> None:
         self._peers = list(peers) if isinstance(peers, list) else []
@@ -973,17 +1023,9 @@ class DashboardWindow(QMainWindow):
 
     def _resolve_transport_mode(self, peer_host: str, vlan_id: int | None) -> str:
         choice = self.mode_combo.currentText().strip().lower()
-        if choice in {"lan", "vlan", "wan"}:
+        if choice in {"lan", "vlan", "wan", "vpn"}:
             return choice
-        if vlan_id is not None:
-            return "vlan"
-        try:
-            peer_ip = ipaddress.ip_address(peer_host)
-        except ValueError:
-            return "lan"
-        if peer_ip.is_private or peer_ip.is_loopback or peer_ip.is_link_local:
-            return "lan"
-        return "wan"
+        return auto_select_transport_mode(vlan_id=vlan_id, peer_address=peer_host)
 
     def _on_transfer_finished(self, file_path: str, bytes_sent: int, chunks: int) -> None:
         self.progress_bar.setRange(0, 100)

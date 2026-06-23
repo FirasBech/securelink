@@ -42,10 +42,13 @@ pip install "cryptography>=42" "scapy>=2.5" "zeroconf>=0.132" "PyQt5>=5.15" "pyt
 | --- | --- | --- |
 | **LAN** | Both machines on the same local network | Direct TCP; peers found via mDNS |
 | **VLAN** | Segmented enterprise network with VLAN policy | TCP, checked against `config/vlan_policy.json` |
-| **WAN** | Across networks / the internet | Reliable UDP (handles loss and reordering) |
+| **VPN** | Both machines on the same VPN (Tailscale, WireGuard…) | Direct TCP over the VPN link — no NAT traversal needed |
+| **WAN** | Across networks / the internet, no shared VPN | Reliable UDP (handles loss and reordering) |
 
-The dashboard and CLI pick a mode automatically (a public peer IP → WAN, a VLAN
-id → VLAN, otherwise LAN), or you can force one with `--wan` / the mode selector.
+The dashboard and CLI pick a mode automatically (a VLAN id → VLAN, a Tailscale /
+CGNAT `100.64.0.0/10` peer → VPN, any other public IP → WAN, otherwise LAN), or
+you can force one with `--wan` / the mode selector. WireGuard/OpenVPN peers use
+private IPs (`10.x` / `192.168.x`), so they already route as LAN over the tunnel.
 
 ### Identity and trust
 
@@ -107,14 +110,20 @@ The window has a **Transfer** and **Receive** panel on the left, and the
 2. **Save to:** the download directory (*Browse* to pick one).
 3. Optionally set an **Allowlist** (comma-separated IPs/CIDRs) and tick **WAN**
    for reliable-UDP transfers or **Allow unknown devices** for a first contact.
-4. Click **Start Listening.** The button becomes **Stop**; the status shows
+4. **Your address** lists the IPs this machine is reachable on, labelled
+   LAN / VPN / public — hand one to the sender (prefer the VPN address if you
+   share a VPN). It refreshes with **Refresh Peers**.
+5. Click **Start Listening.** The button becomes **Stop**; the status shows
    "Listening…" then "Received …" when a file arrives. Each start handles one
    incoming transfer.
 
 ### Monitor
 
-- **Network Map** lists LAN peers found via mDNS; selecting one fills the send
-  fields.
+- **Network Map** lists LAN peers found via mDNS — and, if the Tailscale CLI is
+  installed, your tailnet peers too (the **Source** column reads `mdns` or
+  `tailscale`). Selecting one fills the send fields. Tailscale peers assume the
+  default port, since Tailscale can't know if/where SecureLink is listening —
+  adjust the port if needed.
 - **Live Log** shows every event; use the filter box and **Alerts only** toggle
   to narrow it. The summary reads "shown / total events".
 - **Alert** panel lists security alerts, color-coded by severity (HIGH = red,

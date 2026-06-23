@@ -43,11 +43,19 @@ prompt) you tick **Allow unknown devices** for that first contact.
 
 ### Can I transfer over the internet?
 
-Yes, in WAN mode, **if the receiver's UDP port is reachable** (e.g.
-port-forwarded). Fully automatic NAT traversal — STUN discovery, a rendezvous to
-exchange endpoints, and UDP hole punching — is implemented in `core/nat.py`
-(`wan_connect`) but is not yet wired into the one-click send/receive flow. There
-is no relay for symmetric NATs.
+Two ways:
+
+- **Over a VPN (easiest).** If both machines are on the same VPN — Tailscale,
+  WireGuard, etc. — they see each other on a stable private link, so SecureLink
+  uses **direct TCP** and skips NAT traversal entirely. Just use the peer's VPN
+  address (the Receive panel's **Your address** shows yours). Tailscale's
+  `100.64.x` range is auto-detected as VPN mode; WireGuard's private IPs route as
+  LAN over the tunnel. This is the most reliable path today.
+- **Plain WAN.** Works **if the receiver's UDP port is reachable** (e.g.
+  port-forwarded). Fully automatic NAT traversal — STUN discovery, a rendezvous
+  to exchange endpoints, and UDP hole punching — is implemented in `core/nat.py`
+  (`wan_connect`) but is not yet wired into the one-click send/receive flow, and
+  there is no relay for symmetric NATs.
 
 ### Do I need to open ports or change my firewall?
 

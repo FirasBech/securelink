@@ -6,7 +6,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-from core.discovery import auto_select_transport_mode, discover_peers
+from core.discovery import auto_select_transport_mode, discover_peers, tailscale_peers
 from core.stun import StunError, discover_public_endpoint
 from core.transport import TransferStats, TransportConfig, receive_file, send_file
 from core.udp_transport import udp_receive_file, udp_send_file
@@ -102,6 +102,12 @@ def _cmd_recv(args: argparse.Namespace) -> int:
 
 def _cmd_scan(args: argparse.Namespace) -> int:
     peers = discover_peers(timeout=args.timeout)
+    seen = {peer.address for peer in peers}
+    # Best-effort: empty unless the Tailscale CLI is installed and up.
+    for peer in tailscale_peers():
+        if peer.address not in seen:
+            peers.append(peer)
+            seen.add(peer.address)
     print(json.dumps([peer.__dict__ for peer in peers], indent=2, sort_keys=True))
     return 0
 

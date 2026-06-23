@@ -67,7 +67,7 @@ identical.
 ```mermaid
 flowchart TD
   UI[CLI / Dashboard] --> SEL{transport mode}
-  SEL -->|LAN, VLAN| TCP[_StreamChannel / TCP]
+  SEL -->|LAN, VLAN, VPN| TCP[_StreamChannel / TCP]
   SEL -->|WAN| NAT[STUN + rendezvous + hole punch] --> UDP[ReliableUdpChannel / UDP]
   TCP --> CH[FrameChannel]
   UDP --> CH
@@ -78,10 +78,11 @@ flowchart TD
 
 ### Lifecycle of a transfer
 
-1. **Select mode** — `auto_select_transport_mode` chooses LAN, VLAN, or WAN from
-   the peer address and VLAN id; `--wan` or the dashboard can override it.
-2. **Connect** — LAN/VLAN open a TCP connection; WAN binds a UDP socket (and, for
-   NAT'd peers, runs the setup below).
+1. **Select mode** — `auto_select_transport_mode` chooses LAN, VLAN, VPN, or WAN
+   from the peer address and VLAN id; `--wan` or the dashboard can override it. A
+   peer in the Tailscale/CGNAT range (`100.64.0.0/10`) is treated as VPN.
+2. **Connect** — LAN/VLAN/VPN open a TCP connection; WAN binds a UDP socket (and,
+   for NAT'd peers, runs the setup below).
 3. **Handshake** — each side sends its Ed25519 identity key, an X25519 ephemeral
    key, a nonce, and a signature over both keys. Each verifies the signature,
    applies Trust-On-First-Use against `known_hosts.json`, then derives the
@@ -106,6 +107,22 @@ away. For peers behind NAT, `nat.py` establishes the path first:
 
 `wan_connect` returns the punched socket, handed to `ReliableUdpChannel` like any
 other. There is no relay fallback for symmetric NATs.
+
+### Over a VPN (the easy path across the internet)
+
+If both machines are on the same VPN (WireGuard, Tailscale, …) they already see
+each other on a stable virtual link, so SecureLink skips NAT traversal entirely
+and uses **direct TCP** — the most reliable option. WireGuard/OpenVPN hand out
+private IPs (`10.x` / `192.168.x`) that already route as LAN; Tailscale's
+`100.64.0.0/10` range is recognised as **VPN** mode so it routes over TCP rather
+than the WAN UDP path. `discovery.py` adds two conveniences:
+
+- `local_reachable_addresses()` — lists this host's reachable IPs (LAN / VPN /
+  public), so the receiver knows which address to hand the sender. The dashboard
+  Receive panel shows it as **Your address**.
+- `tailscale_peers()` — when the `tailscale` CLI is present, lists tailnet peers
+  (parsed from `tailscale status --json`) so they appear in the Network Map
+  alongside mDNS peers. The `scan` command merges them too.
 
 ### Passive monitoring
 
@@ -205,6 +222,9 @@ python -m ui.cli send sample.bin 192.168.1.50 --vlan 30
 
 # Send over WAN (reliable UDP)
 python -m ui.cli send sample.bin 203.0.113.10 --wan --port 55000
+
+# Send over a VPN (e.g. a Tailscale address) — auto-detected as direct TCP
+python -m ui.cli send sample.bin 100.101.0.5
 
 # Send to an unknown peer without an interactive trust prompt
 python -m ui.cli send sample.bin 192.168.1.10 --allow-unknown
