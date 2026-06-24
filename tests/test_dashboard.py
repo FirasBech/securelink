@@ -4,10 +4,27 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import time
+
 from PyQt5.QtWidgets import QApplication, QMessageBox
 
+import ui.dashboard as dashboard
 from core.settings import Settings
 from ui.dashboard import DashboardWindow
+
+
+class _FakeStats:
+    bytes_transferred = 5
+    chunks = 1
+
+
+def _wait_for(predicate, timeout: float = 2.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.02)
+    return False
 
 
 def test_dashboard_window_initializes_offscreen() -> None:
@@ -99,6 +116,67 @@ def test_dashboard_settings_panel_saves(tmp_path, monkeypatch) -> None:
     window.set_rendezvous_edit.setText("nonsense-no-port")
     window._save_settings()
     assert Settings.load(tmp_path).rendezvous == "my.server:6000"
+
+    window.close()
+    window.deleteLater()
+    if app is not None:
+        app.quit()
+
+
+def test_internet_send_routes_through_coordination_when_token_set(tmp_path, monkeypatch) -> None:
+    app = QApplication.instance() or QApplication([])
+    window = DashboardWindow(auto_refresh=False)
+    window._settings_base_dir = tmp_path
+    monkeypatch.setattr(QMessageBox, "warning", staticmethod(lambda *a, **k: None))
+
+    calls: list[tuple] = []
+
+    def fake_wan_send(file_path, *, rendezvous_addr, token, relay_addr=None, **kwargs):
+        calls.append((token, rendezvous_addr, relay_addr))
+        return _FakeStats()
+
+    monkeypatch.setattr(dashboard, "wan_send_file", fake_wan_send)
+
+    source = tmp_path / "f.bin"
+    source.write_bytes(b"hello")
+    window.file_edit.setText(str(source))
+    window.send_token_edit.setText("alice-bob")
+
+    # No rendezvous configured yet -> rejected, no coordinated call.
+    window.send_selected_file()
+    assert calls == []
+
+    # Configure a rendezvous (and relay) -> the coordinated path is used.
+    Settings(rendezvous="rdv.example:6000", relay="relay.example:6001").save(tmp_path)
+    window.send_selected_file()
+    assert _wait_for(lambda: bool(calls)), "wan_send_file was not called"
+    assert calls[0] == ("alice-bob", ("rdv.example", 6000), ("relay.example", 6001))
+
+    window.close()
+    window.deleteLater()
+    if app is not None:
+        app.quit()
+
+
+def test_internet_receive_routes_through_coordination_when_token_set(tmp_path, monkeypatch) -> None:
+    app = QApplication.instance() or QApplication([])
+    window = DashboardWindow(auto_refresh=False)
+    window._settings_base_dir = tmp_path
+    Settings(rendezvous="rdv.example:6000").save(tmp_path)
+
+    calls: list[tuple] = []
+
+    def fake_wan_recv(*, rendezvous_addr, token, relay_addr=None, **kwargs):
+        calls.append((token, rendezvous_addr, relay_addr))
+        return (tmp_path / "got.bin", _FakeStats())
+
+    monkeypatch.setattr(dashboard, "wan_receive_file", fake_wan_recv)
+
+    window.recv_token_edit.setText("alice-bob")
+    window.recv_output_edit.setText(str(tmp_path))
+    window.toggle_receiving()
+    assert _wait_for(lambda: bool(calls)), "wan_receive_file was not called"
+    assert calls[0] == ("alice-bob", ("rdv.example", 6000), None)
 
     window.close()
     window.deleteLater()

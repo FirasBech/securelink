@@ -211,7 +211,7 @@ do not produce these events, and transfers still work.
 | `Connection refused` when sending | The receiver isn't listening, wrong IP/port, or a firewall is blocking the port. |
 | `address already in use` when receiving | Another process holds that port; pick a different `--port`. |
 | Device doesn't appear in *Devices on Your Network* | mDNS may be blocked on the network; type the IP and port manually. |
-| WAN transfer to an internet peer times out | The receiver's UDP port must be reachable (port-forwarded). NAT hole punching is available programmatically (`core.nat.wan_connect`) but not yet wired into the one-click send. |
+| WAN transfer to an internet peer times out | Either port-forward the receiver's UDP port and use the address directly (tick WAN), or use a coordination server: set it on the Settings tab and enter the same Internet token on both sides. |
 | No ARP/TTL/VLAN alerts ever appear | Packet capture needs admin/root (and Npcap on Windows); without it the guards stay quiet by design. |
 | Shortcut still shows the old/default icon | Windows caches icons — sign out and back in, or restart Explorer. |
 | "A device's key changed" / connection refused | TOFU protection: the peer's identity key differs from what's stored. If legitimate (reinstall), remove its entry from `~/.securelink/known_hosts.json`. |

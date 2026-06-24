@@ -55,7 +55,12 @@ from core.discovery import (
 )
 from core.settings import Settings, SettingsError, parse_host_port
 from core.transport import TransportConfig, receive_file, send_file
-from core.udp_transport import udp_receive_file, udp_send_file
+from core.udp_transport import (
+    udp_receive_file,
+    udp_send_file,
+    wan_receive_file,
+    wan_send_file,
+)
 
 LOG_DIR = Path.home() / ".securelink" / "logs"
 ICON_PATH = Path(__file__).resolve().parents[1] / "assets" / "securelink.ico"
@@ -699,6 +704,13 @@ class DashboardWindow(QMainWindow):
             "Tick this the first time you connect to a new device to trust its identity. "
             "After that it's remembered, and a changed identity is refused."
         )
+        self.send_token_edit = QLineEdit()
+        self.send_token_edit.setPlaceholderText("shared word, to send over the internet")
+        self.send_token_edit.setToolTip(
+            "To send over the internet via your coordination server (set it on the "
+            "Settings tab), enter a token and have the receiver use the same one. The "
+            "Address/Port above are ignored. Leave blank for local/VPN transfers."
+        )
 
         adv_header, adv_box = self._make_collapsible("Advanced options")
         adv_grid = QGridLayout(adv_box)
@@ -712,6 +724,8 @@ class DashboardWindow(QMainWindow):
         adv_grid.addWidget(QLabel("VLAN ID"), 1, 0)
         adv_grid.addWidget(self.vlan_spin, 1, 1)
         adv_grid.addWidget(self.allow_unknown_checkbox, 1, 2, 1, 2)
+        adv_grid.addWidget(QLabel("Internet token"), 2, 0)
+        adv_grid.addWidget(self.send_token_edit, 2, 1, 1, 3)
         parent_layout.addWidget(adv_header)
         parent_layout.addWidget(adv_box)
 
@@ -798,6 +812,13 @@ class DashboardWindow(QMainWindow):
         self.recv_allow_unknown_checkbox.setToolTip(
             "Tick this for a first-time sender to trust its identity (remembered afterwards)."
         )
+        self.recv_token_edit = QLineEdit()
+        self.recv_token_edit.setPlaceholderText("shared word, to receive over the internet")
+        self.recv_token_edit.setToolTip(
+            "To receive over the internet via your coordination server (set it on the "
+            "Settings tab), enter the same token the sender uses. Leave blank for "
+            "local/VPN transfers."
+        )
 
         adv_header, adv_box = self._make_collapsible("Advanced options")
         adv_grid = QGridLayout(adv_box)
@@ -807,6 +828,8 @@ class DashboardWindow(QMainWindow):
         adv_grid.addWidget(QLabel("Allowlist"), 1, 0)
         adv_grid.addWidget(self.recv_allowlist_edit, 1, 1)
         adv_grid.addWidget(self.recv_allow_unknown_checkbox, 2, 0, 1, 2)
+        adv_grid.addWidget(QLabel("Internet token"), 3, 0)
+        adv_grid.addWidget(self.recv_token_edit, 3, 1)
         parent_layout.addWidget(adv_header)
         parent_layout.addWidget(adv_box)
 
@@ -846,6 +869,14 @@ class DashboardWindow(QMainWindow):
             for entry in self.recv_allowlist_edit.text().split(",")
             if entry.strip()
         )
+
+        # Internet transfer via a coordination server takes precedence when a
+        # token is given.
+        token = self.recv_token_edit.text().strip()
+        if token:
+            self._receive_over_internet(token, output_dir, allowlist)
+            return
+
         wan = self.recv_wan_checkbox.isChecked()
         config = TransportConfig(
             mode="wan" if wan else "lan",
@@ -870,6 +901,55 @@ class DashboardWindow(QMainWindow):
                     output_path, stats = udp_receive_file(config=config, cancel_event=cancel)
                 else:
                     output_path, stats = receive_file(config=config, cancel_event=cancel)
+            except Exception as exc:
+                self.receive_failed.emit(str(exc))
+                return
+            self.receive_finished.emit(str(output_path), stats.bytes_transferred, stats.chunks)
+
+        self._receive_thread = threading.Thread(target=_worker, daemon=True)
+        self._receive_thread.start()
+
+    def _receive_over_internet(self, token: str, output_dir: str, allowlist: tuple[str, ...]) -> None:
+        resolved = self._coordination_settings()
+        if resolved is None:
+            self.receive_status_label.setText("Set a Rendezvous server in Settings")
+            QMessageBox.warning(
+                self,
+                "SecureLink",
+                "To receive over the internet, set a Rendezvous server in the Settings tab "
+                "first (or clear the Internet token).",
+            )
+            return
+        if resolved[0] == "error":
+            QMessageBox.warning(self, "SecureLink", f"Invalid coordination server: {resolved[1]}")
+            return
+        rendezvous_addr, relay_addr, stun_kwargs = resolved
+
+        config = TransportConfig(
+            mode="wan",
+            allow_unknown=self.recv_allow_unknown_checkbox.isChecked(),
+            allowlist=allowlist,
+            output_dir=Path(output_dir),
+        )
+        cancel = threading.Event()
+        self._receive_cancel = cancel
+
+        self.receive_button.setText("Stop")
+        self.receive_status_label.setText("Connecting via coordination server...")
+        self._start_pulse(self.receive_status_label)
+        self.status_changed.emit("Waiting for an internet transfer...")
+
+        def _worker() -> None:
+            try:
+                output_path, stats = wan_receive_file(
+                    rendezvous_addr=rendezvous_addr,
+                    token=token,
+                    relay_addr=relay_addr,
+                    config=config,
+                    cancel_event=cancel,
+                    base_dir=self._settings_base_dir,
+                    **stun_kwargs,
+                )
             except Exception as exc:
                 self.receive_failed.emit(str(exc))
                 return
@@ -1324,6 +1404,13 @@ class DashboardWindow(QMainWindow):
             self._reject_send(f"File not found: {file_path}")
             return
 
+        # Internet transfer via a coordination server takes precedence when a
+        # token is given (the peer address is then irrelevant).
+        token = self.send_token_edit.text().strip()
+        if token:
+            self._send_over_internet(file_path, token)
+            return
+
         peer_host = self.peer_host_edit.text().strip()
         if not peer_host and self.peer_selector.currentIndex() >= 0:
             peer = self.peer_selector.currentData()
@@ -1353,13 +1440,7 @@ class DashboardWindow(QMainWindow):
         self.status_changed.emit(f"Sending {Path(file_path).name} in {mode.upper()} mode...")
         self._transfer_start = time.monotonic()
 
-        last_emit = [0.0]
-
-        def on_progress(sent: int, total: int) -> None:
-            now = time.monotonic()
-            if sent >= total or now - last_emit[0] >= 0.05:
-                last_emit[0] = now
-                self.transfer_progress.emit(sent, total)
+        on_progress = self._make_progress_emitter()
 
         def _worker() -> None:
             try:
@@ -1369,6 +1450,75 @@ class DashboardWindow(QMainWindow):
                     )
                 else:
                     stats = send_file(file_path, peer_host, config=config, progress=on_progress)
+            except Exception as exc:
+                self.transfer_failed.emit(str(exc))
+                return
+            self.transfer_finished.emit(file_path, stats.bytes_transferred, stats.chunks)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _coordination_settings(self):
+        """Return (rendezvous_addr, relay_addr, stun_kwargs) or None if not set up."""
+        settings = Settings.load(self._settings_base_dir)
+        try:
+            rendezvous_addr = settings.rendezvous_addr()
+            relay_addr = settings.relay_addr()
+        except SettingsError as exc:
+            return ("error", str(exc))
+        if rendezvous_addr is None:
+            return None
+        stun_kwargs: dict[str, Any] = {}
+        if settings.stun_host:
+            stun_kwargs["stun_host"] = settings.stun_host
+        if settings.stun_port:
+            stun_kwargs["stun_port"] = settings.stun_port
+        return rendezvous_addr, relay_addr, stun_kwargs
+
+    def _make_progress_emitter(self):
+        last_emit = [0.0]
+
+        def on_progress(sent: int, total: int) -> None:
+            now = time.monotonic()
+            if sent >= total or now - last_emit[0] >= 0.05:
+                last_emit[0] = now
+                self.transfer_progress.emit(sent, total)
+
+        return on_progress
+
+    def _send_over_internet(self, file_path: str, token: str) -> None:
+        resolved = self._coordination_settings()
+        if resolved is None:
+            self._reject_send(
+                "To send over the internet, set a Rendezvous server in the Settings tab "
+                "(or clear the Internet token to send directly)."
+            )
+            return
+        if resolved[0] == "error":
+            self._reject_send(f"Invalid coordination server in Settings: {resolved[1]}")
+            return
+        rendezvous_addr, relay_addr, stun_kwargs = resolved
+
+        config = TransportConfig(mode="wan", allow_unknown=self.allow_unknown_checkbox.isChecked())
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.transfer_detail_label.setText("Connecting via coordination server...")
+        self._start_pulse(self.transfer_detail_label)
+        self.status_changed.emit(f"Sending {Path(file_path).name} over the internet...")
+        self._transfer_start = time.monotonic()
+        on_progress = self._make_progress_emitter()
+
+        def _worker() -> None:
+            try:
+                stats = wan_send_file(
+                    file_path,
+                    rendezvous_addr=rendezvous_addr,
+                    token=token,
+                    relay_addr=relay_addr,
+                    config=config,
+                    progress=on_progress,
+                    base_dir=self._settings_base_dir,
+                    **stun_kwargs,
+                )
             except Exception as exc:
                 self.transfer_failed.emit(str(exc))
                 return

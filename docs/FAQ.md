@@ -51,13 +51,16 @@ Two ways:
   address (the *Receive a File* panel's **Your address** shows yours). Tailscale's
   `100.64.x` range is auto-detected as VPN mode; WireGuard's private IPs route as
   LAN over the tunnel. This is the most reliable path today.
-- **Plain WAN.** Works **if the receiver's UDP port is reachable** (e.g.
-  port-forwarded). Fully automatic NAT traversal — STUN discovery, NAT-type
-  detection (`natcheck`), a rendezvous to exchange endpoints, UDP hole punching,
-  and a TURN-style relay fallback (`RelayServer`) for symmetric NATs — is
-  implemented in `core/nat.py` (`wan_connect`). You host the coordination servers
-  yourself (`python -m ui.cli rendezvous` / `relay`); they aren't yet wired into
-  the one-click send/receive flow.
+- **Coordination server (through NATs).** STUN discovery, NAT-type detection
+  (`natcheck`), a rendezvous to exchange endpoints, UDP hole punching, and a
+  TURN-style relay fallback (`RelayServer`) for symmetric NATs. You host the
+  servers yourself (`python -m ui.cli rendezvous` / `relay`), point SecureLink at
+  them on the **Settings** tab, then transfer by entering the same **Internet
+  token** on both sides — in the dashboard's Send/Receive tabs (Advanced
+  options) or via `wansend` / `wanrecv` on the CLI.
+
+- **Plain WAN.** Also works **if the receiver's UDP port is reachable** (e.g.
+  port-forwarded) — tick **WAN** and use the address directly, no server needed.
 
 ### Does SecureLink use anyone's server? Do I have to trust a third party?
 
