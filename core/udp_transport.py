@@ -10,8 +10,11 @@ Each datagram is ``type(1) | seq(4) | payload`` where type is DATA or ACK. The
 sender keeps a congestion window of unacked frames in flight (AIMD with slow
 start, capped by the receiver window ``window``), ACKs are *per-frame*
 (selective), and on timeout only the individual frames that are still unacked and
-overdue are retransmitted — not the whole window. The retransmit timeout adapts
-to measured RTT (RFC 6298 RTO estimation with Karn's algorithm and exponential
+overdue are retransmitted — not the whole window. Loss is also recovered *before*
+the RTO via SACK-based fast retransmit: three selective ACKs for frames past the
+oldest unacked frame imply it was lost, so it is resent at once (TCP-style fast
+retransmit, generalised to selective ACKs). The retransmit timeout adapts to
+measured RTT (RFC 6298 RTO estimation with Karn's algorithm and exponential
 backoff), and a loss event halves the slow-start threshold. The receiver
 buffers out-of-order frames within its window and delivers them in order once the
 gaps fill. ``flush`` drains the window before close and ``linger`` re-services
@@ -51,6 +54,10 @@ _HEADER_LEN = _HEADER.size  # 5
 _MAX_DATAGRAM = 65535
 
 DEFAULT_WINDOW = 32
+
+# Selective ACKs this many frames past the oldest unacked frame trigger an
+# immediate (fast) retransmit of it, rather than waiting for the RTO.
+FAST_RETRANSMIT_DUP_ACKS = 3
 
 # Adaptive retransmit timeout (RFC 6298-style RTO estimation).
 DEFAULT_INITIAL_RTO = 0.5
@@ -112,6 +119,9 @@ class ReliableUdpChannel:
         self._unacked: dict[int, list] = {}
         self._acked: set[int] = set()
         self._retries = 0
+        # Count of selective ACKs received for frames past send_base while it
+        # remains unacked — the SACK analogue of TCP's duplicate-ACK counter.
+        self._dup_acks = 0
 
         # Congestion control (AIMD with slow start). The send window is the
         # congestion window cwnd (in frames), capped by the receiver window
@@ -193,9 +203,19 @@ class ReliableUdpChannel:
                 self._grow_cwnd()
                 self._acked.add(seq)
                 self._retries = 0
+                base_before = self._send_base
                 while self._send_base in self._acked:
                     self._acked.discard(self._send_base)
                     self._send_base += 1
+                if self._send_base != base_before:
+                    # The oldest unacked frame advanced; clear the dup-ACK tally.
+                    self._dup_acks = 0
+                elif seq > self._send_base:
+                    # A later frame arrived but send_base is still missing —
+                    # a SACK gap. Enough of these mean it was lost; resend now.
+                    self._dup_acks += 1
+                    if self._dup_acks >= FAST_RETRANSMIT_DUP_ACKS:
+                        self._fast_retransmit()
         elif mtype == _TYPE_DATA:
             payload = data[_HEADER_LEN:]
             if seq < self._recv_seq:
@@ -208,6 +228,17 @@ class ReliableUdpChannel:
                     self._recv_seq += 1
                 self._send_ack(seq)
             # Frames beyond the receive window are ignored (sender will resend).
+
+    def _fast_retransmit(self) -> None:
+        """Resend the oldest unacked frame immediately on a SACK gap (no RTO wait)."""
+        self._dup_acks = 0
+        entry = self._unacked.get(self._send_base)
+        if entry is None or self._peer_addr is None:
+            return
+        self._sock.sendto(entry[0], self._peer_addr)
+        entry[1] = time.monotonic()
+        entry[2] = True  # exclude from RTT sampling (Karn's algorithm)
+        self._shrink_cwnd()
 
     def _retransmit_overdue(self) -> None:
         if not self._unacked:

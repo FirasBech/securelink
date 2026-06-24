@@ -58,8 +58,10 @@ written once against that interface (`stream_send` / `stream_receive` in
 - **`_StreamChannel`** wraps a TCP socket (LAN, VLAN); TCP supplies ordering and
   reliability.
 - **`ReliableUdpChannel`** (`udp_transport.py`) gives the same guarantees over
-  UDP for WAN, adding its own selective-repeat ARQ, RTT-adaptive retransmit
-  timeout (RFC 6298 + Karn), and AIMD congestion window.
+  UDP for WAN, adding its own selective-repeat ARQ, SACK-based fast retransmit
+  (resend on three selective ACKs past the oldest unacked frame, before the RTO),
+  an RTT-adaptive retransmit timeout (RFC 6298 + Karn), and an AIMD congestion
+  window.
 
 A "mode" is just which channel is used; the security envelope above it is
 identical.
@@ -296,8 +298,8 @@ pytest tests/ -v
 
 ## Known Limitations
 
-- WAN reliability is selective-repeat windowed ARQ (up to 32 frames in flight): per-frame ACKs, out-of-order receive buffering, retransmission of only the overdue frames, and a graceful-close linger that recovers a dropped final ACK. It is verified against 25% bidirectional packet loss. The retransmit timeout adapts to measured RTT (RFC 6298, with Karn's algorithm and exponential backoff), and the send window is an AIMD congestion window with slow start (halving on loss). Loss recovery is timeout-driven; a SACK-based fast-retransmit would recover quicker than waiting for the RTO and is the natural refinement.
-- WAN NAT traversal is coordinated end to end (`core/nat.py`): STUN endpoint discovery, a TCP rendezvous that swaps the two peers' endpoints by token, and simultaneous-open UDP hole punching via `wan_connect`. Not bundled: a TURN-style relay fallback for symmetric NATs where hole punching cannot succeed. The path is verified on loopback, not across real NATs.
+- WAN reliability is selective-repeat windowed ARQ (up to 32 frames in flight): per-frame ACKs, out-of-order receive buffering, retransmission of only the overdue frames, and a graceful-close linger that recovers a dropped final ACK. It is verified against 25% bidirectional packet loss. Loss is recovered both by RTO timeout (RFC 6298 adaptive, with Karn's algorithm and exponential backoff) and by SACK-based fast retransmit (three selective ACKs past the oldest unacked frame resend it before the RTO); the send window is an AIMD congestion window with slow start (halving on loss).
+- WAN NAT traversal is coordinated end to end (`core/nat.py`): STUN endpoint discovery, NAT-type classification (`natcheck` — endpoint-independent vs symmetric mapping), a TCP rendezvous that swaps the two peers' endpoints by token, and simultaneous-open UDP hole punching via `wan_connect`. Not bundled: a TURN-style relay fallback for symmetric NATs where hole punching cannot succeed. The path is verified on loopback, not across real NATs.
 - VLAN mode validates policy and metadata, not L2 802.1Q tagged frame generation.
 
 ## Notes

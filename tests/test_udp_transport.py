@@ -132,6 +132,39 @@ def test_congestion_avoidance_grows_window_sublinearly() -> None:
         sock.close()
 
 
+def test_fast_retransmit_on_three_sack_gaps() -> None:
+    sock, channel = _local_channel()
+    try:
+        channel._cwnd = 8.0
+        channel._ssthresh = 8.0
+        # Frames 0..3 in flight, none retransmitted; frame 0 is the missing base.
+        for seq in range(4):
+            channel._unacked[seq] = [_HEADER.pack(_TYPE_DATA, seq) + b"x", time.monotonic(), False]
+        channel._next_seq = 4
+
+        # Selective ACKs for 1 and 2 are two SACK gaps past base 0 — not enough yet.
+        channel._handle_datagram(_HEADER.pack(_TYPE_ACK, 1))
+        channel._handle_datagram(_HEADER.pack(_TYPE_ACK, 2))
+        assert channel._dup_acks == 2
+        assert channel._unacked[0][2] is False  # base not resent yet
+
+        # The third gap ACK triggers an immediate fast retransmit of base 0,
+        # without waiting for the RTO.
+        channel._handle_datagram(_HEADER.pack(_TYPE_ACK, 3))
+        assert channel._dup_acks == 0           # counter reset after the retransmit
+        assert channel._unacked[0][2] is True   # base 0 was resent (Karn flag set)
+        assert channel._send_base == 0          # still waiting for 0 to be acked
+        assert channel._cwnd < 8.0              # multiplicative decrease on the loss
+        assert channel._ssthresh == channel._cwnd
+
+        # Once 0 is acked the window clears in order.
+        channel._handle_datagram(_HEADER.pack(_TYPE_ACK, 0))
+        assert channel._send_base == 4
+        assert channel._unacked == {}
+    finally:
+        sock.close()
+
+
 def test_loss_event_halves_window() -> None:
     sock, channel = _local_channel()
     try:
