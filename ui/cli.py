@@ -156,6 +156,25 @@ def _cmd_stun(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_natcheck(args: argparse.Namespace) -> int:
+    from core.nat import detect_nat_mapping
+
+    assessment = detect_nat_mapping(timeout=args.timeout)
+    print(
+        json.dumps(
+            {
+                "mapping": assessment.mapping,
+                "reflexive_ip": assessment.reflexive.ip if assessment.reflexive else None,
+                "reflexive_port": assessment.reflexive.port if assessment.reflexive else None,
+                "hole_punch_likely": assessment.hole_punch_likely,
+                "advice": assessment.advice,
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="securelink")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -203,6 +222,12 @@ def build_parser() -> argparse.ArgumentParser:
     stun_parser.add_argument("--stun-host", default="stun.l.google.com")
     stun_parser.add_argument("--stun-port", type=int, default=19302)
     stun_parser.set_defaults(func=_cmd_stun)
+
+    natcheck_parser = subparsers.add_parser(
+        "natcheck", help="classify this host's NAT and whether WAN hole punching will work", parents=[common]
+    )
+    natcheck_parser.add_argument("--timeout", type=float, default=3.0)
+    natcheck_parser.set_defaults(func=_cmd_natcheck)
 
     return parser
 

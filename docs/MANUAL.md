@@ -148,6 +148,7 @@ command.
 | `logs` | Print today's security log (`--tail N`, `--alerts-only`) |
 | `status` | Show running transfer counters |
 | `stun` | Print this host's public IP:port via STUN (`--stun-host`, `--stun-port`) |
+| `natcheck` | Classify this host's NAT and whether WAN hole punching will work (`--timeout`) |
 
 Examples:
 

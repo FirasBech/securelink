@@ -33,6 +33,14 @@ from .stun import DEFAULT_STUN_HOST, DEFAULT_STUN_PORT, StunError, discover_publ
 PUNCH = b"\x02"
 PUNCH_ACK = b"\x03"
 
+# Two STUN servers with distinct IPs — comparing the reflexive port each one
+# reports reveals whether the NAT's mapping is endpoint-independent (punchable)
+# or endpoint-dependent / symmetric (not punchable).
+DEFAULT_NAT_PROBE_SERVERS = (
+    (DEFAULT_STUN_HOST, DEFAULT_STUN_PORT),
+    ("stun1.l.google.com", 19302),
+)
+
 
 class NatError(RuntimeError):
     """Raised on any rendezvous or hole-punch failure."""
@@ -45,6 +53,99 @@ class PeerEndpoint:
 
     def as_tuple(self) -> tuple[str, int]:
         return self.ip, self.port
+
+
+@dataclass(frozen=True)
+class NatAssessment:
+    """What a STUN probe revealed about this host's NAT, and what to do about it."""
+
+    mapping: str  # open | endpoint_independent | endpoint_dependent | udp_blocked | unknown
+    reflexive: PeerEndpoint | None
+    hole_punch_likely: bool
+    advice: str
+
+
+def _primary_local_ipv4() -> str | None:
+    """The local IPv4 the OS would use to reach the internet (no packets sent)."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.connect(("8.8.8.8", 80))
+        return sock.getsockname()[0]
+    except OSError:
+        return None
+    finally:
+        sock.close()
+
+
+def detect_nat_mapping(
+    servers: tuple[tuple[str, int], ...] = DEFAULT_NAT_PROBE_SERVERS,
+    *,
+    timeout: float = 3.0,
+    bind_host: str = "0.0.0.0",
+) -> NatAssessment:
+    """Classify this host's NAT by comparing reflexive endpoints from two servers.
+
+    From a single local socket, query each STUN server and compare the public
+    ``ip:port`` each reports. Same mapping for both → endpoint-independent (hole
+    punching should work). Different → symmetric (it won't; use a VPN or relay).
+    Reflexive address equal to the local address → no NAT. No answers → UDP is
+    likely blocked. Network-free in tests by monkeypatching ``discover_public_endpoint``.
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    results: list[object] = []
+    try:
+        sock.bind((bind_host, 0))
+        sock.settimeout(timeout)
+        for host, port in servers:
+            try:
+                results.append(
+                    discover_public_endpoint(host, port, local_socket=sock, timeout=timeout)
+                )
+            except StunError:
+                results.append(None)
+    finally:
+        sock.close()
+
+    seen = [r for r in results if r is not None]
+    if not seen:
+        return NatAssessment(
+            "udp_blocked",
+            None,
+            False,
+            "No STUN response — outbound UDP may be blocked. Use a VPN (Tailscale) or stay on the LAN.",
+        )
+
+    first = seen[0]
+    reflexive = PeerEndpoint(first.ip, first.port)  # type: ignore[attr-defined]
+    local_ip = _primary_local_ipv4()
+    if local_ip and first.ip == local_ip:  # type: ignore[attr-defined]
+        return NatAssessment(
+            "open", reflexive, True, "No NAT detected — direct WAN transfers should work."
+        )
+
+    if len(seen) >= 2:
+        a, b = seen[0], seen[1]
+        if a.ip == b.ip and a.port == b.port:  # type: ignore[attr-defined]
+            return NatAssessment(
+                "endpoint_independent",
+                reflexive,
+                True,
+                "Cone NAT (endpoint-independent mapping) — UDP hole punching should work.",
+            )
+        return NatAssessment(
+            "endpoint_dependent",
+            reflexive,
+            False,
+            "Symmetric NAT (mapping changes per destination) — hole punching will likely fail. "
+            "Use a VPN (Tailscale) or a relay.",
+        )
+
+    return NatAssessment(
+        "unknown",
+        reflexive,
+        False,
+        "Only one STUN server answered — NAT type undetermined. A VPN is the safe choice.",
+    )
 
 
 def _send_line(sock: socket.socket, obj: dict) -> None:

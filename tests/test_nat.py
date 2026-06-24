@@ -3,13 +3,16 @@ from __future__ import annotations
 import socket
 import threading
 
+from core import nat
 from core.nat import (
     PeerEndpoint,
     RendezvousServer,
+    detect_nat_mapping,
     rendezvous_exchange,
     udp_hole_punch,
     wan_connect,
 )
+from core.stun import MappedAddress, StunError
 from core.udp_transport import ReliableUdpChannel
 
 
@@ -72,6 +75,81 @@ def test_udp_hole_punch_loopback() -> None:
     finally:
         sock_a.close()
         sock_b.close()
+
+
+def _fake_stun(mapping: dict[tuple[str, int], MappedAddress | None]):
+    """Return a discover_public_endpoint stand-in keyed by (host, port)."""
+
+    def fake(host, port, *, local_socket=None, timeout=3.0, retries=3):
+        result = mapping.get((host, port))
+        if result is None:
+            raise StunError("no response")
+        return result
+
+    return fake
+
+
+def test_detect_nat_endpoint_independent(monkeypatch) -> None:
+    # Both servers report the same public ip:port -> cone NAT, punchable.
+    servers = (("a", 1), ("b", 2))
+    monkeypatch.setattr(nat, "_primary_local_ipv4", lambda: "192.168.1.50")
+    monkeypatch.setattr(
+        nat,
+        "discover_public_endpoint",
+        _fake_stun(
+            {
+                ("a", 1): MappedAddress("203.0.113.9", 50000),
+                ("b", 2): MappedAddress("203.0.113.9", 50000),
+            }
+        ),
+    )
+    result = detect_nat_mapping(servers)
+    assert result.mapping == "endpoint_independent"
+    assert result.hole_punch_likely is True
+    assert result.reflexive == PeerEndpoint("203.0.113.9", 50000)
+
+
+def test_detect_nat_symmetric(monkeypatch) -> None:
+    # Different external port per destination -> symmetric NAT, not punchable.
+    servers = (("a", 1), ("b", 2))
+    monkeypatch.setattr(nat, "_primary_local_ipv4", lambda: "192.168.1.50")
+    monkeypatch.setattr(
+        nat,
+        "discover_public_endpoint",
+        _fake_stun(
+            {
+                ("a", 1): MappedAddress("203.0.113.9", 50000),
+                ("b", 2): MappedAddress("203.0.113.9", 61000),
+            }
+        ),
+    )
+    result = detect_nat_mapping(servers)
+    assert result.mapping == "endpoint_dependent"
+    assert result.hole_punch_likely is False
+    assert "VPN" in result.advice
+
+
+def test_detect_nat_open_internet(monkeypatch) -> None:
+    # Reflexive address equals the local address -> no NAT.
+    servers = (("a", 1), ("b", 2))
+    monkeypatch.setattr(nat, "_primary_local_ipv4", lambda: "203.0.113.9")
+    monkeypatch.setattr(
+        nat,
+        "discover_public_endpoint",
+        _fake_stun({("a", 1): MappedAddress("203.0.113.9", 50000)}),
+    )
+    result = detect_nat_mapping(servers)
+    assert result.mapping == "open"
+    assert result.hole_punch_likely is True
+
+
+def test_detect_nat_udp_blocked(monkeypatch) -> None:
+    servers = (("a", 1), ("b", 2))
+    monkeypatch.setattr(nat, "_primary_local_ipv4", lambda: "192.168.1.50")
+    monkeypatch.setattr(nat, "discover_public_endpoint", _fake_stun({}))
+    result = detect_nat_mapping(servers)
+    assert result.mapping == "udp_blocked"
+    assert result.hole_punch_likely is False
 
 
 def test_wan_connect_then_reliable_transfer_loopback() -> None:
