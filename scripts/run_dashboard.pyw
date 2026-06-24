@@ -12,6 +12,19 @@ import os
 import sys
 from pathlib import Path
 
+# Claim our own Windows taskbar identity as early as possible — before PyQt is
+# even imported — so the taskbar shows the SecureLink icon instead of the
+# generic Python (pythonw) one. launch_dashboard() sets it again harmlessly.
+if sys.platform == "win32":
+    try:
+        import ctypes
+
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+            "FirasBech.SecureLink.Dashboard"
+        )
+    except Exception:
+        pass
+
 ROOT = Path(__file__).resolve().parents[1]
 os.chdir(ROOT)
 sys.path.insert(0, str(ROOT))
