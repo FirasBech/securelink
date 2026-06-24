@@ -6,8 +6,10 @@ import threading
 from core import nat
 from core.nat import (
     PeerEndpoint,
+    RelayServer,
     RendezvousServer,
     detect_nat_mapping,
+    relay_connect,
     rendezvous_exchange,
     udp_hole_punch,
     wan_connect,
@@ -150,6 +152,101 @@ def test_detect_nat_udp_blocked(monkeypatch) -> None:
     result = detect_nat_mapping(servers)
     assert result.mapping == "udp_blocked"
     assert result.hole_punch_likely is False
+
+
+def test_relay_pairs_and_forwards_reliable_transfer() -> None:
+    relay = RelayServer(host="127.0.0.1")
+    relay.start()
+    connections: dict[str, tuple[socket.socket, tuple[str, int]]] = {}
+    errors: list[BaseException] = []
+    try:
+
+        def connect(name: str) -> None:
+            try:
+                connections[name] = relay_connect(
+                    relay.address, "room", bind_host="127.0.0.1", timeout=6
+                )
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        ta = threading.Thread(target=connect, args=("A",))
+        tb = threading.Thread(target=connect, args=("B",))
+        ta.start()
+        tb.start()
+        ta.join(8)
+        tb.join(8)
+
+        assert not errors, f"relay pairing failed: {errors!r}"
+        sock_a, peer_a = connections["A"]
+        sock_b, peer_b = connections["B"]
+        # Both peers talk to the relay's address; it forwards between them.
+        assert peer_a == relay.address and peer_b == relay.address
+
+        channel_a = ReliableUdpChannel(sock_a, peer_a)
+        channel_b = ReliableUdpChannel(sock_b, peer_b)
+        received: dict[str, bytes] = {}
+
+        def receive() -> None:
+            received["msg"] = channel_b.recv_frame()
+
+        receiver = threading.Thread(target=receive)
+        receiver.start()
+        channel_a.send_frame(b"relayed-hello")
+        channel_a.flush()
+        receiver.join(5)
+
+        assert received.get("msg") == b"relayed-hello"
+    finally:
+        relay.stop()
+        for sock, _ in connections.values():
+            sock.close()
+
+
+def test_wan_connect_falls_back_to_relay_when_punch_fails(monkeypatch) -> None:
+    # Force hole punching to fail so wan_connect must use the relay.
+    from core import nat
+
+    monkeypatch.setattr(
+        nat, "udp_hole_punch", lambda *a, **k: (_ for _ in ()).throw(nat.NatError("blocked"))
+    )
+
+    rendezvous = RendezvousServer(host="127.0.0.1")
+    rendezvous.start()
+    relay = RelayServer(host="127.0.0.1")
+    relay.start()
+    connections: dict[str, tuple[socket.socket, tuple[str, int]]] = {}
+    errors: list[BaseException] = []
+    try:
+
+        def connect(name: str) -> None:
+            try:
+                connections[name] = wan_connect(
+                    rendezvous_addr=rendezvous.address,
+                    token="room",
+                    bind_host="127.0.0.1",
+                    stun_host=None,
+                    relay_addr=relay.address,
+                    timeout=6,
+                )
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        ta = threading.Thread(target=connect, args=("A",))
+        tb = threading.Thread(target=connect, args=("B",))
+        ta.start()
+        tb.start()
+        ta.join(10)
+        tb.join(10)
+
+        assert not errors, f"wan_connect relay fallback failed: {errors!r}"
+        sock_a, peer_a = connections["A"]
+        sock_b, peer_b = connections["B"]
+        assert peer_a == relay.address and peer_b == relay.address
+    finally:
+        rendezvous.stop()
+        relay.stop()
+        for sock, _ in connections.values():
+            sock.close()
 
 
 def test_wan_connect_then_reliable_transfer_loopback() -> None:

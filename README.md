@@ -2,7 +2,7 @@
 
 SecureLink is a Python file-transfer tool for LAN, VLAN, and WAN. Every transfer is mutually authenticated, encrypted per chunk, and audit-logged, and the same security envelope runs over TCP on a LAN and over a reliable-UDP transport across the internet.
 
-LAN and VLAN use direct TCP. WAN uses reliable UDP (selective-repeat windowed ARQ) with an RFC 8489 STUN client, a TCP rendezvous for endpoint signaling, and simultaneous-open UDP hole punching. A TURN-style relay for symmetric NATs is not bundled (see Known Limitations).
+LAN and VLAN use direct TCP. WAN uses reliable UDP (selective-repeat windowed ARQ) with an RFC 8489 STUN client, NAT-type detection, a TCP rendezvous for endpoint signaling, and simultaneous-open UDP hole punching — with a TURN-style UDP relay fallback for symmetric NATs where punching can't succeed (see Known Limitations).
 
 **Docs:** [User Manual](docs/MANUAL.md) · [FAQ](docs/FAQ.md)
 
@@ -70,7 +70,7 @@ identical.
 flowchart TD
   UI[CLI / Dashboard] --> SEL{transport mode}
   SEL -->|LAN, VLAN, VPN| TCP[_StreamChannel / TCP]
-  SEL -->|WAN| NAT[STUN + rendezvous + hole punch] --> UDP[ReliableUdpChannel / UDP]
+  SEL -->|WAN| NAT[STUN + rendezvous + hole punch, relay fallback] --> UDP[ReliableUdpChannel / UDP]
   TCP --> CH[FrameChannel]
   UDP --> CH
   CH --> HS[handshake: Ed25519 + X25519 + TOFU]
@@ -108,7 +108,15 @@ away. For peers behind NAT, `nat.py` establishes the path first:
    (simultaneous open).
 
 `wan_connect` returns the punched socket, handed to `ReliableUdpChannel` like any
-other. There is no relay fallback for symmetric NATs.
+other. `natcheck` (`detect_nat_mapping`) probes two STUN servers up front and
+classifies the NAT as endpoint-independent (punchable) or symmetric, so a peer
+knows whether to expect direct WAN or to use VPN/relay.
+
+When hole punching can't succeed (symmetric NAT), `wan_connect` falls back to a
+**relay**: `RelayServer` is a minimal TURN-style UDP forwarder — both peers
+register a shared token and it blindly forwards datagrams between them, with the
+reliable channel running over it unchanged. Run one with `python -m ui.cli relay`
+(and the matchmaker with `python -m ui.cli rendezvous`).
 
 ### Over a VPN (the easy path across the internet)
 
@@ -246,6 +254,10 @@ python -m ui.cli stun --stun-host stun.l.google.com --stun-port 19302
 # Classify this host's NAT — will direct WAN hole punching work, or use a VPN?
 python -m ui.cli natcheck
 
+# Host the WAN coordination servers (run these on a publicly reachable machine)
+python -m ui.cli rendezvous --port 6000   # endpoint matchmaker for hole punching
+python -m ui.cli relay --port 6001        # UDP relay fallback for symmetric NATs
+
 # Isolate identity/known_hosts/session/logs under a chosen directory
 python -m ui.cli --help  # --state-dir is available on every subcommand
 python -m ui.cli status --state-dir ./demo-state
@@ -299,7 +311,7 @@ pytest tests/ -v
 ## Known Limitations
 
 - WAN reliability is selective-repeat windowed ARQ (up to 32 frames in flight): per-frame ACKs, out-of-order receive buffering, retransmission of only the overdue frames, and a graceful-close linger that recovers a dropped final ACK. It is verified against 25% bidirectional packet loss. Loss is recovered both by RTO timeout (RFC 6298 adaptive, with Karn's algorithm and exponential backoff) and by SACK-based fast retransmit (three selective ACKs past the oldest unacked frame resend it before the RTO); the send window is an AIMD congestion window with slow start (halving on loss).
-- WAN NAT traversal is coordinated end to end (`core/nat.py`): STUN endpoint discovery, NAT-type classification (`natcheck` — endpoint-independent vs symmetric mapping), a TCP rendezvous that swaps the two peers' endpoints by token, and simultaneous-open UDP hole punching via `wan_connect`. Not bundled: a TURN-style relay fallback for symmetric NATs where hole punching cannot succeed. The path is verified on loopback, not across real NATs.
+- WAN NAT traversal is coordinated end to end (`core/nat.py`): STUN endpoint discovery, NAT-type classification (`natcheck` — endpoint-independent vs symmetric mapping), a TCP rendezvous that swaps the two peers' endpoints by token, and simultaneous-open UDP hole punching via `wan_connect`, with a TURN-style UDP relay fallback (`RelayServer`, `python -m ui.cli relay`) for symmetric NATs where hole punching cannot succeed. The path is verified on loopback (including the relay fallback), not across real NATs.
 - VLAN mode validates policy and metadata, not L2 802.1Q tagged frame generation.
 
 ## Notes

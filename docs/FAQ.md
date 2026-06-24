@@ -52,10 +52,12 @@ Two ways:
   `100.64.x` range is auto-detected as VPN mode; WireGuard's private IPs route as
   LAN over the tunnel. This is the most reliable path today.
 - **Plain WAN.** Works **if the receiver's UDP port is reachable** (e.g.
-  port-forwarded). Fully automatic NAT traversal — STUN discovery, a rendezvous
-  to exchange endpoints, and UDP hole punching — is implemented in `core/nat.py`
-  (`wan_connect`) but is not yet wired into the one-click send/receive flow, and
-  there is no relay for symmetric NATs.
+  port-forwarded). Fully automatic NAT traversal — STUN discovery, NAT-type
+  detection (`natcheck`), a rendezvous to exchange endpoints, UDP hole punching,
+  and a TURN-style relay fallback (`RelayServer`) for symmetric NATs — is
+  implemented in `core/nat.py` (`wan_connect`). You host the coordination servers
+  yourself (`python -m ui.cli rendezvous` / `relay`); they aren't yet wired into
+  the one-click send/receive flow.
 
 ### Do I need a Tailscale account to use VPN mode?
 

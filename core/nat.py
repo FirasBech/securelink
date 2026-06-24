@@ -15,8 +15,12 @@ The probe datagrams use type bytes distinct from the reliable transport's DATA
 (0x00) and ACK (0x01), so any stragglers are harmlessly ignored once the
 reliable channel takes over.
 
-A TURN-style relay fallback (for symmetric NATs where hole punching cannot
-succeed) is not implemented. All failures raise ``NatError``.
+For symmetric NATs, where hole punching cannot succeed, ``RelayServer`` /
+``relay_connect`` provide a minimal TURN-style UDP relay: both peers register a
+shared token with a publicly reachable relay, which then blindly forwards
+datagrams between the two registered endpoints. The reliable channel runs over
+that relay unchanged (it just sends to the relay's address). ``wan_connect`` can
+fall back to it when ``udp_hole_punch`` fails. All failures raise ``NatError``.
 """
 
 from __future__ import annotations
@@ -32,6 +36,13 @@ from .stun import DEFAULT_STUN_HOST, DEFAULT_STUN_PORT, StunError, discover_publ
 # Probe types (0x00/0x01 are the reliable transport's DATA/ACK).
 PUNCH = b"\x02"
 PUNCH_ACK = b"\x03"
+
+# Relay control types. Clients only ever send REGISTER; the server only ever
+# sends PAIRED. Data forwarded through the relay keeps its 0x00/0x01 type byte,
+# so the relay can tell a control datagram (0x04) from a data datagram.
+RELAY_REGISTER = b"\x04"
+RELAY_PAIRED = b"\x06"
+_RELAY_MAX_DATAGRAM = 65535
 
 # Two STUN servers with distinct IPs — comparing the reflexive port each one
 # reports reveals whether the NAT's mapping is endpoint-independent (punchable)
@@ -326,6 +337,136 @@ def udp_hole_punch(
             break
 
 
+class RelayServer:
+    """A minimal TURN-style UDP relay: forwards datagrams between two peers.
+
+    Each peer sends ``RELAY_REGISTER | token``; once two distinct endpoints share
+    a token the relay pairs them and answers both with ``RELAY_PAIRED``. After
+    that, any non-register datagram from one peer is forwarded verbatim to the
+    other. The reliable transport's own ARQ rides over this unchanged.
+    """
+
+    def __init__(self, host: str = "0.0.0.0", port: int = 0) -> None:
+        self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self._sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._sock.bind((host, port))
+        self.address: tuple[str, int] = self._sock.getsockname()
+        # token -> list of registered endpoints; endpoint -> partner endpoint.
+        self._members: dict[str, list[tuple[str, int]]] = {}
+        self._partner: dict[tuple[str, int], tuple[str, int]] = {}
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._serve, daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        try:
+            self._sock.close()
+        except OSError:
+            pass
+        self._thread.join(timeout=2)
+
+    def _serve(self) -> None:
+        self._sock.settimeout(0.3)
+        while not self._stop.is_set():
+            try:
+                data, addr = self._sock.recvfrom(_RELAY_MAX_DATAGRAM)
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            if data[:1] == RELAY_REGISTER:
+                self._register(data[1:], addr)
+            else:
+                partner = self._partner.get(addr)
+                if partner is not None:
+                    try:
+                        self._sock.sendto(data, partner)
+                    except OSError:
+                        pass
+
+    def _register(self, token_bytes: bytes, addr: tuple[str, int]) -> None:
+        try:
+            token = token_bytes.decode("utf-8")
+        except UnicodeDecodeError:
+            return
+        with self._lock:
+            members = self._members.setdefault(token, [])
+            if addr not in members:
+                if len(members) >= 2:
+                    return  # room full; ignore a third peer
+                members.append(addr)
+            if len(members) == 2:
+                a, b = members
+                self._partner[a] = b
+                self._partner[b] = a
+        # Confirm pairing (idempotent: a re-register after pairing re-confirms).
+        if self._partner.get(addr) is not None:
+            for endpoint in (addr, self._partner[addr]):
+                try:
+                    self._sock.sendto(RELAY_PAIRED, endpoint)
+                except OSError:
+                    pass
+
+
+def relay_register(
+    sock: socket.socket,
+    relay_addr: tuple[str, int],
+    token: str,
+    *,
+    timeout: float = 10.0,
+    interval: float = 0.2,
+) -> None:
+    """Register ``token`` with the relay and block until the peer is paired."""
+
+    message = RELAY_REGISTER + token.encode("utf-8")
+    deadline = time.monotonic() + timeout
+    last_send = 0.0
+    while time.monotonic() < deadline:
+        now = time.monotonic()
+        if now - last_send >= interval:
+            try:
+                sock.sendto(message, relay_addr)
+            except OSError as exc:
+                raise NatError(f"cannot reach relay {relay_addr}") from exc
+            last_send = now
+        sock.settimeout(max(0.0, min(interval, deadline - time.monotonic())))
+        try:
+            data, addr = sock.recvfrom(64)
+        except (socket.timeout, OSError):
+            continue
+        if addr == relay_addr and data[:1] == RELAY_PAIRED:
+            return
+    raise NatError("relay pairing timed out")
+
+
+def relay_connect(
+    relay_addr: tuple[str, int],
+    token: str,
+    *,
+    bind_host: str = "0.0.0.0",
+    bind_port: int = 0,
+    timeout: float = 10.0,
+) -> tuple[socket.socket, tuple[str, int]]:
+    """Bind a UDP socket and pair with a peer through the relay.
+
+    Returns ``(sock, relay_addr)`` for a ``ReliableUdpChannel``: the channel
+    sends to the relay, which forwards to the paired peer (and vice versa).
+    """
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.bind((bind_host, bind_port))
+        relay_register(sock, relay_addr, token, timeout=timeout)
+        return sock, relay_addr
+    except Exception:
+        sock.close()
+        raise
+
+
 def wan_connect(
     *,
     rendezvous_addr: tuple[str, int],
@@ -334,13 +475,16 @@ def wan_connect(
     bind_port: int = 0,
     stun_host: str | None = DEFAULT_STUN_HOST,
     stun_port: int = DEFAULT_STUN_PORT,
+    relay_addr: tuple[str, int] | None = None,
     timeout: float = 10.0,
 ) -> tuple[socket.socket, tuple[str, int]]:
     """Bind a UDP socket, coordinate via STUN + rendezvous, and hole punch.
 
     Returns ``(sock, peer_addr)`` ready to hand to a ``ReliableUdpChannel``. Pass
     ``stun_host=None`` to advertise the socket's local address instead of a
-    STUN-discovered one (useful for same-host / testing).
+    STUN-discovered one (useful for same-host / testing). If hole punching fails
+    and ``relay_addr`` is given, falls back to the relay and returns
+    ``(sock, relay_addr)`` — the channel then runs over the relay transparently.
     """
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -361,7 +505,14 @@ def wan_connect(
             local_endpoint = PeerEndpoint(host, int(port))
 
         peer_endpoint = rendezvous_exchange(rendezvous_addr, token, local_endpoint, timeout=timeout)
-        udp_hole_punch(sock, peer_endpoint.as_tuple(), timeout=timeout)
+        try:
+            udp_hole_punch(sock, peer_endpoint.as_tuple(), timeout=timeout)
+        except NatError:
+            if relay_addr is None:
+                raise
+            # Symmetric NAT (or otherwise un-punchable): relay instead.
+            relay_register(sock, relay_addr, token, timeout=timeout)
+            return sock, relay_addr
         return sock, peer_endpoint.as_tuple()
     except Exception:
         sock.close()

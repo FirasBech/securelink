@@ -149,6 +149,8 @@ command.
 | `status` | Show running transfer counters |
 | `stun` | Print this host's public IP:port via STUN (`--stun-host`, `--stun-port`) |
 | `natcheck` | Classify this host's NAT and whether WAN hole punching will work (`--timeout`) |
+| `rendezvous` | Run an endpoint-matchmaker server for hole punching (`--host`, `--port`) |
+| `relay` | Run a UDP relay server — fallback for symmetric NATs (`--host`, `--port`) |
 
 Examples:
 

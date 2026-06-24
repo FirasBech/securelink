@@ -175,6 +175,33 @@ def _cmd_natcheck(args: argparse.Namespace) -> int:
     return 0
 
 
+def _serve_forever(server: Any, kind: str) -> int:
+    import threading
+
+    server.start()
+    host, port = server.address
+    print(json.dumps({"status": f"{kind} listening", "host": host, "port": port}), flush=True)
+    try:
+        threading.Event().wait()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.stop()
+    return 0
+
+
+def _cmd_rendezvous(args: argparse.Namespace) -> int:
+    from core.nat import RendezvousServer
+
+    return _serve_forever(RendezvousServer(host=args.host, port=args.port), "rendezvous")
+
+
+def _cmd_relay(args: argparse.Namespace) -> int:
+    from core.nat import RelayServer
+
+    return _serve_forever(RelayServer(host=args.host, port=args.port), "relay")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="securelink")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -228,6 +255,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     natcheck_parser.add_argument("--timeout", type=float, default=3.0)
     natcheck_parser.set_defaults(func=_cmd_natcheck)
+
+    rendezvous_parser = subparsers.add_parser(
+        "rendezvous", help="run a rendezvous server (endpoint matchmaker for hole punching)", parents=[common]
+    )
+    rendezvous_parser.add_argument("--host", default="0.0.0.0")
+    rendezvous_parser.add_argument("--port", type=int, default=0)
+    rendezvous_parser.set_defaults(func=_cmd_rendezvous)
+
+    relay_parser = subparsers.add_parser(
+        "relay", help="run a UDP relay server (fallback for symmetric NATs)", parents=[common]
+    )
+    relay_parser.add_argument("--host", default="0.0.0.0")
+    relay_parser.add_argument("--port", type=int, default=0)
+    relay_parser.set_defaults(func=_cmd_relay)
 
     return parser
 
