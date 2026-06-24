@@ -89,35 +89,43 @@ Everything per-user is under `~/.securelink/`:
 
 ![The SecureLink dashboard](screenshots/dashboard.png)
 
-The window has a **Send a File** and **Receive a File** panel on the left, and
-the **Devices on Your Network**, **Activity Log**, and **Security Alerts**
-panels on the right. Each input has a tooltip — hover over it for a plain-English
-explanation.
+The dashboard is organised into five tabs — **Send**, **Receive**, **Network**,
+**Activity**, and **Settings** — so you only see one task at a time. Each input
+has a tooltip; hover for a plain-English explanation. Rarely-needed fields live
+under a collapsed **Advanced options** toggle so the common case stays simple.
 
-### Send a file
+### Send a file (Send tab)
 
-1. **Send a File → File:** click *Browse* and choose a file.
-2. **Device / Address:** pick a discovered device from the dropdown / *Devices on
-   Your Network* list, or type the address and port directly.
-3. **Mode:** leave on *Auto*, or force *LAN / VLAN / VPN / WAN*.
-4. The first time you send to a new device, tick **Allow unknown devices** (the
-   GUI has no console for the interactive trust prompt — ticking this records the
-   peer's fingerprint and proceeds).
-5. Click **Send File.** The progress bar shows percent, bytes, and live
+1. **File:** click *Browse* and choose a file.
+2. **Device / Address:** pick a discovered device from the dropdown (populated
+   from the *Network* tab), or type the address and port directly.
+3. *(Optional)* expand **Advanced options** to force a **Mode**
+   (*LAN / VLAN / VPN / WAN*), set MTU/VLAN, or tick **Allow unknown devices**
+   the first time you send to a new device (the GUI has no console for the trust
+   prompt — ticking this records the peer's fingerprint and proceeds).
+4. Click **Send File.** The progress bar shows percent, bytes, and live
    throughput; the status line confirms when it finishes.
 
-### Receive a file
+### Receive a file (Receive tab)
 
-1. **Receive a File → Port:** the port to listen on (default 55000).
+1. **Port:** the port to listen on (default 55000).
 2. **Save to:** the download directory (*Browse* to pick one).
-3. Optionally set an **Allowlist** (comma-separated IPs/CIDRs) and tick **WAN**
-   for reliable-UDP transfers or **Allow unknown devices** for a first contact.
-4. **Your address** lists the IPs this machine is reachable on, labelled
+3. **Your address** lists the IPs this machine is reachable on, labelled
    LAN / VPN / public — hand one to the sender (prefer the VPN address if you
-   share a VPN). It refreshes with **Refresh Peers**.
+   share a VPN). It refreshes with **Refresh Peers** on the Send tab.
+4. *(Optional)* expand **Advanced options** for **WAN** (reliable UDP), an
+   **Allowlist**, or **Allow unknown devices** on first contact.
 5. Click **Start Listening.** The button becomes **Stop**; the status shows
    "Listening…" then "Received …" when a file arrives. Each start handles one
    incoming transfer.
+
+### Internet servers (Settings tab)
+
+SecureLink bundles no server. To transfer over the internet through NATs you can
+optionally point it at your **own** coordination servers: enter a **Rendezvous**
+(and optional **Relay**) `host:port` and click **Save Settings**. Leave them
+blank to use LAN/VPN only. Host the servers with `python -m ui.cli rendezvous`
+and `python -m ui.cli relay`.
 
 ### Monitor
 

@@ -4,8 +4,9 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PyQt5.QtWidgets import QApplication
+from PyQt5.QtWidgets import QApplication, QMessageBox
 
+from core.settings import Settings
 from ui.dashboard import DashboardWindow
 
 
@@ -59,6 +60,45 @@ def test_dashboard_friendly_ux() -> None:
     assert not window.network_hint_label.isHidden()
     window._render_network_table([{"name": "host", "address": "192.168.1.9", "port": 55000}])
     assert window.network_hint_label.isHidden()
+
+    window.close()
+    window.deleteLater()
+    if app is not None:
+        app.quit()
+
+
+def test_dashboard_is_tabbed() -> None:
+    from PyQt5.QtWidgets import QTabWidget
+
+    app = QApplication.instance() or QApplication([])
+    window = DashboardWindow(auto_refresh=False)
+    tabs = window.findChild(QTabWidget)
+    assert tabs is not None
+    labels = [tabs.tabText(i).strip() for i in range(tabs.count())]
+    assert labels == ["Send", "Receive", "Network", "Activity", "Settings"]
+    window.close()
+    window.deleteLater()
+    if app is not None:
+        app.quit()
+
+
+def test_dashboard_settings_panel_saves(tmp_path, monkeypatch) -> None:
+    app = QApplication.instance() or QApplication([])
+    window = DashboardWindow(auto_refresh=False)
+    window._settings_base_dir = tmp_path
+
+    # A valid BYO coordination server persists.
+    window.set_rendezvous_edit.setText("my.server:6000")
+    window.set_relay_edit.setText("")
+    window._save_settings()
+    assert Settings.load(tmp_path).rendezvous == "my.server:6000"
+    assert window.settings_status_label.text() == "Saved"
+
+    # An invalid address is rejected and nothing is overwritten.
+    monkeypatch.setattr(QMessageBox, "warning", staticmethod(lambda *a, **k: None))
+    window.set_rendezvous_edit.setText("nonsense-no-port")
+    window._save_settings()
+    assert Settings.load(tmp_path).rendezvous == "my.server:6000"
 
     window.close()
     window.deleteLater()

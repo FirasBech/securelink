@@ -38,9 +38,9 @@ from PyQt5.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSpinBox,
-    QSplitter,
     QTableWidget,
     QTableWidgetItem,
+    QTabWidget,
     QTextBrowser,
     QVBoxLayout,
     QWidget,
@@ -53,6 +53,7 @@ from core.discovery import (
     tailscale_peers,
     tailscale_state,
 )
+from core.settings import Settings, SettingsError, parse_host_port
 from core.transport import TransportConfig, receive_file, send_file
 from core.udp_transport import udp_receive_file, udp_send_file
 
@@ -158,6 +159,7 @@ class DashboardWindow(QMainWindow):
         self._all_alert_entries: list[dict[str, Any]] = []
         self._receive_thread: threading.Thread | None = None
         self._receive_cancel: threading.Event | None = None
+        self._settings_base_dir: Path | None = None  # overridable in tests
         self._build_window()
         self._connect_signals()
         self._configure_refresh()
@@ -207,34 +209,52 @@ class DashboardWindow(QMainWindow):
         header_layout.addWidget(subtitle)
         header_layout.addWidget(self.status_label)
 
-        splitter = QSplitter(Qt.Horizontal, central_widget)
-        splitter.setChildrenCollapsible(False)
+        # One focused task per tab keeps the window calm instead of showing
+        # every panel and field at once.
+        tabs = QTabWidget()
+        tabs.setObjectName("MainTabs")
+        tabs.setDocumentMode(True)
 
-        left_panel = QWidget()
-        left_layout = QVBoxLayout(left_panel)
-        left_layout.setContentsMargins(2, 2, 2, 2)
-        left_layout.setSpacing(12)
-
-        right_panel = QWidget()
-        right_layout = QVBoxLayout(right_panel)
-        right_layout.setContentsMargins(2, 2, 2, 2)
-        right_layout.setSpacing(12)
-
-        self._build_transfer_panel(left_layout)
-        self._build_receive_panel(left_layout)
-        self._build_network_panel(left_layout)
-        self._build_log_panel(right_layout)
-        self._build_alert_panel(right_layout)
-
-        splitter.addWidget(self._scrollable(left_panel))
-        splitter.addWidget(self._scrollable(right_panel))
-        splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 2)
+        tabs.addTab(self._tab_with(self._build_transfer_panel), "  Send  ")
+        tabs.addTab(self._tab_with(self._build_receive_panel), "  Receive  ")
+        tabs.addTab(self._tab_with(self._build_network_panel), "  Network  ")
+        tabs.addTab(self._tab_with(self._build_activity_panels), "  Activity  ")
+        tabs.addTab(self._tab_with(self._build_settings_panel), "  Settings  ")
 
         root_layout.addWidget(header)
-        root_layout.addWidget(splitter)
+        root_layout.addWidget(tabs, stretch=1)
 
         self.statusBar().showMessage("Ready")
+
+    def _tab_with(self, builder) -> QWidget:
+        """Build a panel into a scrollable tab page (so it adapts to small screens)."""
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(6, 10, 6, 6)
+        layout.setSpacing(12)
+        builder(layout)
+        layout.addStretch(1)
+        return self._scrollable(page)
+
+    def _build_activity_panels(self, parent_layout: QVBoxLayout) -> None:
+        self._build_log_panel(parent_layout)
+        self._build_alert_panel(parent_layout)
+
+    def _make_collapsible(self, title: str) -> tuple[QPushButton, QWidget]:
+        """A click-to-expand header + hidden container for advanced options."""
+        header = QPushButton(f"▸  {title}")
+        header.setObjectName("CollapseHeader")
+        header.setCheckable(True)
+        header.setCursor(Qt.PointingHandCursor)
+        container = QWidget()
+        container.setVisible(False)
+
+        def on_toggle(checked: bool) -> None:
+            container.setVisible(checked)
+            header.setText(("▾  " if checked else "▸  ") + title)
+
+        header.toggled.connect(on_toggle)
+        return header, container
 
     def _scrollable(self, content: QWidget) -> QScrollArea:
         """Wrap a panel column so it scrolls instead of clipping on small screens."""
@@ -516,6 +536,45 @@ class DashboardWindow(QMainWindow):
             QSplitter::handle {
                 background: #334155;
             }
+            QTabWidget#MainTabs::pane {
+                border: 1px solid #334155;
+                border-radius: 12px;
+                background: #1e293b;
+                top: -1px;
+            }
+            QTabBar::tab {
+                background: transparent;
+                color: #94a3b8;
+                padding: 9px 18px;
+                margin-right: 4px;
+                border: 1px solid transparent;
+                border-top-left-radius: 10px;
+                border-top-right-radius: 10px;
+                font-weight: 600;
+            }
+            QTabBar::tab:hover {
+                color: #e2e8f0;
+            }
+            QTabBar::tab:selected {
+                background: #1e293b;
+                color: #f8fafc;
+                border-color: #334155;
+                border-bottom-color: #1e293b;
+            }
+            QPushButton#CollapseHeader {
+                background: transparent;
+                color: #94a3b8;
+                text-align: left;
+                padding: 6px 4px;
+                font-weight: 600;
+            }
+            QPushButton#CollapseHeader:hover {
+                color: #e2e8f0;
+                background: transparent;
+            }
+            QPushButton#CollapseHeader:pressed {
+                background: transparent;
+            }
             QScrollBar:vertical {
                 background: #0f172a;
                 width: 12px;
@@ -565,15 +624,10 @@ class DashboardWindow(QMainWindow):
         self.receive_failed.connect(self._on_receive_failed)
 
     def _build_transfer_panel(self, parent_layout: QVBoxLayout) -> None:
-        group = QGroupBox("Send a File")
-        outer = QVBoxLayout(group)
-        outer.setContentsMargins(12, 12, 12, 12)
-        outer.setSpacing(10)
-
         hint = QLabel("1. Pick a file   2. Choose a device or type its address   3. Send File")
         hint.setObjectName("PanelHint")
         hint.setWordWrap(True)
-        outer.addWidget(hint)
+        parent_layout.addWidget(hint)
 
         grid = QGridLayout()
         grid.setHorizontalSpacing(10)
@@ -607,33 +661,59 @@ class DashboardWindow(QMainWindow):
         self.peer_port_spin.setValue(55000)
         self.peer_port_spin.setToolTip("The port the receiver is listening on (default 55000).")
 
+        grid.addWidget(QLabel("File"), 0, 0)
+        grid.addWidget(self.file_edit, 0, 1, 1, 2)
+        grid.addWidget(browse_button, 0, 3)
+
+        grid.addWidget(QLabel("Device"), 1, 0)
+        grid.addWidget(self.peer_selector, 1, 1, 1, 3)
+
+        grid.addWidget(QLabel("Address"), 2, 0)
+        grid.addWidget(self.peer_host_edit, 2, 1)
+        grid.addWidget(QLabel("Port"), 2, 2)
+        grid.addWidget(self.peer_port_spin, 2, 3)
+        parent_layout.addLayout(grid)
+
+        # Advanced options — collapsed by default so beginners aren't overwhelmed.
         self.mode_combo = QComboBox()
         self.mode_combo.addItems(["Auto", "LAN", "VLAN", "WAN", "VPN"])
         self.mode_combo.setToolTip(
             "How to reach the peer. Leave on Auto unless you know you need a specific "
             "mode: LAN/VLAN/VPN use direct TCP, WAN uses reliable UDP across the internet."
         )
-
         self.mtu_spin = QSpinBox()
         self.mtu_spin.setRange(576, 9000)
         self.mtu_spin.setValue(1500)
         self.mtu_spin.setToolTip(
-            "Advanced: largest packet size in bytes. Leave at 1500 for normal networks."
+            "Largest packet size in bytes. Leave at 1500 for normal networks."
         )
-
         self.vlan_spin = QSpinBox()
         self.vlan_spin.setRange(0, 4094)
         self.vlan_spin.setValue(0)
         self.vlan_spin.setSpecialValueText("None")
         self.vlan_spin.setToolTip(
-            "Advanced: tag the transfer with a VLAN id for policy checks. Leave as None."
+            "Tag the transfer with a VLAN id for policy checks. Leave as None."
         )
-
-        self.allow_unknown_checkbox = QCheckBox("Allow unknown devices")
+        self.allow_unknown_checkbox = QCheckBox("Allow unknown devices (first contact)")
         self.allow_unknown_checkbox.setToolTip(
             "Tick this the first time you connect to a new device to trust its identity. "
             "After that it's remembered, and a changed identity is refused."
         )
+
+        adv_header, adv_box = self._make_collapsible("Advanced options")
+        adv_grid = QGridLayout(adv_box)
+        adv_grid.setContentsMargins(4, 4, 4, 4)
+        adv_grid.setColumnStretch(1, 1)
+        adv_grid.setColumnStretch(3, 1)
+        adv_grid.addWidget(QLabel("Mode"), 0, 0)
+        adv_grid.addWidget(self.mode_combo, 0, 1)
+        adv_grid.addWidget(QLabel("MTU"), 0, 2)
+        adv_grid.addWidget(self.mtu_spin, 0, 3)
+        adv_grid.addWidget(QLabel("VLAN ID"), 1, 0)
+        adv_grid.addWidget(self.vlan_spin, 1, 1)
+        adv_grid.addWidget(self.allow_unknown_checkbox, 1, 2, 1, 2)
+        parent_layout.addWidget(adv_header)
+        parent_layout.addWidget(adv_box)
 
         self.refresh_peers_button = QPushButton("Refresh Peers")
         self.refresh_peers_button.clicked.connect(self.refresh_peers)
@@ -650,49 +730,19 @@ class DashboardWindow(QMainWindow):
         self.transfer_detail_label = QLabel("Idle")
         self.transfer_detail_label.setObjectName("TransferDetails")
 
-        grid.addWidget(QLabel("File"), 0, 0)
-        grid.addWidget(self.file_edit, 0, 1, 1, 2)
-        grid.addWidget(browse_button, 0, 3)
-
-        grid.addWidget(QLabel("Device"), 1, 0)
-        grid.addWidget(self.peer_selector, 1, 1, 1, 3)
-
-        grid.addWidget(QLabel("Address"), 2, 0)
-        grid.addWidget(self.peer_host_edit, 2, 1)
-        grid.addWidget(QLabel("Port"), 2, 2)
-        grid.addWidget(self.peer_port_spin, 2, 3)
-
-        grid.addWidget(QLabel("Mode"), 3, 0)
-        grid.addWidget(self.mode_combo, 3, 1)
-        grid.addWidget(QLabel("MTU"), 3, 2)
-        grid.addWidget(self.mtu_spin, 3, 3)
-
-        grid.addWidget(QLabel("VLAN ID"), 4, 0)
-        grid.addWidget(self.vlan_spin, 4, 1)
-        grid.addWidget(self.allow_unknown_checkbox, 4, 2, 1, 2)
-
         button_row = QHBoxLayout()
         button_row.addWidget(self.refresh_peers_button)
         button_row.addStretch(1)
         button_row.addWidget(self.send_button)
-        grid.addLayout(button_row, 5, 0, 1, 4)
-
-        grid.addWidget(self.progress_bar, 6, 0, 1, 3)
-        grid.addWidget(self.transfer_detail_label, 6, 3)
-
-        outer.addLayout(grid)
-        parent_layout.addWidget(group)
+        parent_layout.addLayout(button_row)
+        parent_layout.addWidget(self.progress_bar)
+        parent_layout.addWidget(self.transfer_detail_label)
 
     def _build_receive_panel(self, parent_layout: QVBoxLayout) -> None:
-        group = QGroupBox("Receive a File")
-        outer = QVBoxLayout(group)
-        outer.setContentsMargins(12, 12, 12, 12)
-        outer.setSpacing(10)
-
         hint = QLabel("Click Start Listening, then give the sender your address shown below.")
         hint.setObjectName("PanelHint")
         hint.setWordWrap(True)
-        outer.addWidget(hint)
+        parent_layout.addWidget(hint)
 
         grid = QGridLayout()
         grid.setHorizontalSpacing(10)
@@ -706,37 +756,11 @@ class DashboardWindow(QMainWindow):
             "The port to listen on. Tell the sender to use this same port (default 55000)."
         )
 
-        self.recv_wan_checkbox = QCheckBox("WAN (reliable UDP)")
-        self.recv_wan_checkbox.setToolTip(
-            "Tick this only if the sender is connecting over the internet (WAN). "
-            "Leave unticked for the same network or a VPN."
-        )
-
         self.recv_output_edit = QLineEdit(str(Path.cwd()))
         self.recv_output_edit.setToolTip("Folder where received files are saved.")
         recv_browse_button = QPushButton("Browse")
         recv_browse_button.clicked.connect(self.choose_output_dir)
         recv_browse_button.setToolTip("Choose the download folder.")
-
-        self.recv_allowlist_edit = QLineEdit()
-        self.recv_allowlist_edit.setPlaceholderText("Allowlist, e.g. 192.168.1.0/24, 10.0.0.5")
-        self.recv_allowlist_edit.setToolTip(
-            "Optional: only accept connections from these IPs or subnets (comma-separated). "
-            "Leave empty to accept any."
-        )
-
-        self.recv_allow_unknown_checkbox = QCheckBox("Allow unknown devices")
-        self.recv_allow_unknown_checkbox.setToolTip(
-            "Tick this for a first-time sender to trust its identity (remembered afterwards)."
-        )
-
-        self.receive_button = QPushButton("Start Listening")
-        self.receive_button.setObjectName("PrimaryButton")
-        self.receive_button.clicked.connect(self.toggle_receiving)
-        self.receive_button.setToolTip("Start listening for one incoming file.")
-
-        self.receive_status_label = QLabel("Idle")
-        self.receive_status_label.setObjectName("ReceiveStatus")
 
         self.local_addr_label = QLabel("Detecting addresses...")
         self.local_addr_label.setObjectName("LocalAddresses")
@@ -749,26 +773,55 @@ class DashboardWindow(QMainWindow):
 
         grid.addWidget(QLabel("Port"), 0, 0)
         grid.addWidget(self.recv_port_spin, 0, 1)
-        grid.addWidget(self.recv_wan_checkbox, 0, 2, 1, 2)
 
         grid.addWidget(QLabel("Save to"), 1, 0)
         grid.addWidget(self.recv_output_edit, 1, 1, 1, 2)
         grid.addWidget(recv_browse_button, 1, 3)
 
-        grid.addWidget(QLabel("Allowlist"), 2, 0)
-        grid.addWidget(self.recv_allowlist_edit, 2, 1)
-        grid.addWidget(self.recv_allow_unknown_checkbox, 2, 2, 1, 2)
+        grid.addWidget(QLabel("Your address"), 2, 0)
+        grid.addWidget(self.local_addr_label, 2, 1, 1, 3)
+        parent_layout.addLayout(grid)
 
-        grid.addWidget(QLabel("Your address"), 3, 0)
-        grid.addWidget(self.local_addr_label, 3, 1, 1, 3)
+        # Advanced options — collapsed by default.
+        self.recv_wan_checkbox = QCheckBox("WAN (reliable UDP)")
+        self.recv_wan_checkbox.setToolTip(
+            "Tick this only if the sender is connecting over the internet (WAN). "
+            "Leave unticked for the same network or a VPN."
+        )
+        self.recv_allowlist_edit = QLineEdit()
+        self.recv_allowlist_edit.setPlaceholderText("Allowlist, e.g. 192.168.1.0/24, 10.0.0.5")
+        self.recv_allowlist_edit.setToolTip(
+            "Optional: only accept connections from these IPs or subnets (comma-separated). "
+            "Leave empty to accept any."
+        )
+        self.recv_allow_unknown_checkbox = QCheckBox("Allow unknown devices (first contact)")
+        self.recv_allow_unknown_checkbox.setToolTip(
+            "Tick this for a first-time sender to trust its identity (remembered afterwards)."
+        )
+
+        adv_header, adv_box = self._make_collapsible("Advanced options")
+        adv_grid = QGridLayout(adv_box)
+        adv_grid.setContentsMargins(4, 4, 4, 4)
+        adv_grid.setColumnStretch(1, 1)
+        adv_grid.addWidget(self.recv_wan_checkbox, 0, 0, 1, 2)
+        adv_grid.addWidget(QLabel("Allowlist"), 1, 0)
+        adv_grid.addWidget(self.recv_allowlist_edit, 1, 1)
+        adv_grid.addWidget(self.recv_allow_unknown_checkbox, 2, 0, 1, 2)
+        parent_layout.addWidget(adv_header)
+        parent_layout.addWidget(adv_box)
+
+        self.receive_button = QPushButton("Start Listening")
+        self.receive_button.setObjectName("PrimaryButton")
+        self.receive_button.clicked.connect(self.toggle_receiving)
+        self.receive_button.setToolTip("Start listening for one incoming file.")
+
+        self.receive_status_label = QLabel("Idle")
+        self.receive_status_label.setObjectName("ReceiveStatus")
 
         button_row = QHBoxLayout()
         button_row.addWidget(self.receive_button)
         button_row.addWidget(self.receive_status_label, 1)
-        grid.addLayout(button_row, 4, 0, 1, 4)
-
-        outer.addLayout(grid)
-        parent_layout.addWidget(group)
+        parent_layout.addLayout(button_row)
 
     def choose_output_dir(self) -> None:
         directory = QFileDialog.getExistingDirectory(
@@ -940,6 +993,111 @@ class DashboardWindow(QMainWindow):
         layout.addWidget(self.alert_summary_label)
         layout.addWidget(self.alert_table)
         parent_layout.addWidget(group, stretch=1)
+
+    def _build_settings_panel(self, parent_layout: QVBoxLayout) -> None:
+        intro = QLabel(
+            "SecureLink uses no server of its own and phones home to nothing. LAN, VLAN "
+            "and VPN transfers are fully peer-to-peer. For internet (WAN) transfers "
+            "through NATs you can optionally run your OWN coordination servers and point "
+            "SecureLink at them below — leave everything blank to skip."
+        )
+        intro.setObjectName("PanelHint")
+        intro.setWordWrap(True)
+        parent_layout.addWidget(intro)
+
+        group = QGroupBox("Coordination servers — bring your own (optional)")
+        grid = QGridLayout(group)
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(10)
+        grid.setColumnStretch(1, 1)
+
+        self.set_rendezvous_edit = QLineEdit()
+        self.set_rendezvous_edit.setPlaceholderText("host:port (optional)")
+        self.set_rendezvous_edit.setToolTip(
+            "A rendezvous server you host (python -m ui.cli rendezvous). It pairs two "
+            "peers by token so they can hole punch. Leave blank to not use one."
+        )
+        self.set_relay_edit = QLineEdit()
+        self.set_relay_edit.setPlaceholderText("host:port (optional)")
+        self.set_relay_edit.setToolTip(
+            "A relay server you host (python -m ui.cli relay), used as a fallback when "
+            "hole punching fails (symmetric NAT). Optional."
+        )
+        self.set_stun_host_edit = QLineEdit()
+        self.set_stun_host_edit.setPlaceholderText("stun.l.google.com (default)")
+        self.set_stun_host_edit.setToolTip(
+            "STUN server used only to learn your public address. Defaults to a public "
+            "one; override if you prefer your own."
+        )
+        self.set_stun_port_spin = QSpinBox()
+        self.set_stun_port_spin.setRange(0, 65535)
+        self.set_stun_port_spin.setValue(0)
+        self.set_stun_port_spin.setSpecialValueText("default")
+        self.set_stun_port_spin.setToolTip("STUN port (0 = default 19302).")
+
+        grid.addWidget(QLabel("Rendezvous"), 0, 0)
+        grid.addWidget(self.set_rendezvous_edit, 0, 1, 1, 3)
+        grid.addWidget(QLabel("Relay"), 1, 0)
+        grid.addWidget(self.set_relay_edit, 1, 1, 1, 3)
+        grid.addWidget(QLabel("STUN host"), 2, 0)
+        grid.addWidget(self.set_stun_host_edit, 2, 1)
+        grid.addWidget(QLabel("STUN port"), 2, 2)
+        grid.addWidget(self.set_stun_port_spin, 2, 3)
+        parent_layout.addWidget(group)
+
+        self.set_save_button = QPushButton("Save Settings")
+        self.set_save_button.setObjectName("PrimaryButton")
+        self.set_save_button.clicked.connect(self._save_settings)
+        self.settings_status_label = QLabel("")
+        self.settings_status_label.setObjectName("ReceiveStatus")
+        row = QHBoxLayout()
+        row.addWidget(self.set_save_button)
+        row.addWidget(self.settings_status_label, 1)
+        parent_layout.addLayout(row)
+
+        howto = QLabel(
+            "Host your own on a public machine:  python -m ui.cli rendezvous --port 6000  "
+            "and  python -m ui.cli relay --port 6001 . Then both peers use the same token."
+        )
+        howto.setObjectName("PanelHint")
+        howto.setWordWrap(True)
+        parent_layout.addWidget(howto)
+
+        self._load_settings_into_form()
+
+    def _load_settings_into_form(self) -> None:
+        settings = Settings.load(self._settings_base_dir)
+        self.set_rendezvous_edit.setText(settings.rendezvous or "")
+        self.set_relay_edit.setText(settings.relay or "")
+        self.set_stun_host_edit.setText(settings.stun_host or "")
+        self.set_stun_port_spin.setValue(settings.stun_port or 0)
+
+    def _save_settings(self) -> None:
+        rendezvous = self.set_rendezvous_edit.text().strip()
+        relay = self.set_relay_edit.text().strip()
+        try:
+            if rendezvous:
+                parse_host_port(rendezvous)
+            if relay:
+                parse_host_port(relay)
+        except SettingsError as exc:
+            self.settings_status_label.setText("Invalid address")
+            QMessageBox.warning(self, "SecureLink", f"Invalid server address: {exc}")
+            return
+        settings = Settings(
+            rendezvous=rendezvous or None,
+            relay=relay or None,
+            stun_host=self.set_stun_host_edit.text().strip() or None,
+            stun_port=self.set_stun_port_spin.value() or None,
+        )
+        try:
+            settings.save(self._settings_base_dir)
+        except OSError as exc:
+            self.settings_status_label.setText("Could not save")
+            QMessageBox.critical(self, "SecureLink", f"Could not save settings: {exc}")
+            return
+        self.settings_status_label.setText("Saved")
+        self.status_changed.emit("Settings saved")
 
     def choose_file(self) -> None:
         file_path, _selected_filter = QFileDialog.getOpenFileName(
