@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from core.nat import RendezvousServer
 from core.transport import TransportConfig
 from core.udp_transport import (
     _HEADER,
@@ -18,6 +19,8 @@ from core.udp_transport import (
     udp_receive_file,
     udp_send_file,
     wan_chunk_size,
+    wan_receive_file,
+    wan_send_file,
 )
 
 
@@ -235,4 +238,63 @@ def test_udp_round_trip_loopback() -> None:
         assert recv_stats.bytes_transferred == len(payload)
         assert send_stats.chunks == recv_stats.chunks > 1
     finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def test_coordinated_wan_transfer_via_rendezvous_loopback() -> None:
+    root = Path(tempfile.mkdtemp(prefix="securelink-wan-"))
+    rendezvous = RendezvousServer(host="127.0.0.1")
+    rendezvous.start()
+    try:
+        sender_base = root / "sender"
+        receiver_base = root / "receiver"
+        receiver_out = root / "out"
+        for path in (sender_base, receiver_base, receiver_out):
+            path.mkdir(parents=True, exist_ok=True)
+
+        payload = (b"coordinated-" * 1500)[:12000]
+        source = root / "wan.bin"
+        source.write_bytes(payload)
+
+        results: dict[str, object] = {}
+        errors: list[BaseException] = []
+
+        def receiver() -> None:
+            try:
+                cfg = TransportConfig(mode="wan", output_dir=receiver_out, allow_unknown=True)
+                results["recv"] = wan_receive_file(
+                    rendezvous_addr=rendezvous.address,
+                    token="room",
+                    stun_host=None,  # advertise loopback directly
+                    config=cfg,
+                    base_dir=receiver_base,
+                    timeout=8,
+                )
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        thread = threading.Thread(target=receiver, daemon=True)
+        thread.start()
+        time.sleep(0.25)
+
+        send_cfg = TransportConfig(mode="wan", allow_unknown=True)
+        send_stats = wan_send_file(
+            source,
+            rendezvous_addr=rendezvous.address,
+            token="room",
+            stun_host=None,
+            config=send_cfg,
+            base_dir=sender_base,
+            timeout=8,
+        )
+
+        thread.join(timeout=20)
+        assert not thread.is_alive(), "coordinated receiver did not finish"
+        assert not errors, f"coordinated transfer failed: {errors!r}"
+
+        recv_path, recv_stats = results["recv"]  # type: ignore[misc]
+        assert Path(recv_path).read_bytes() == payload
+        assert send_stats.bytes_transferred == recv_stats.bytes_transferred == len(payload)
+    finally:
+        rendezvous.stop()
         shutil.rmtree(root, ignore_errors=True)

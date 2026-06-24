@@ -151,6 +151,9 @@ command.
 | `natcheck` | Classify this host's NAT and whether WAN hole punching will work (`--timeout`) |
 | `rendezvous` | Run an endpoint-matchmaker server for hole punching (`--host`, `--port`) |
 | `relay` | Run a UDP relay server — fallback for symmetric NATs (`--host`, `--port`) |
+| `settings` | Show or set your coordination servers (`--rendezvous`, `--relay`, `--stun-host/-port`) |
+| `wansend` | Send over the internet via your coordination server (`<file> --token`, `--rendezvous`, `--relay`) |
+| `wanrecv` | Receive over the internet via your coordination server (`--token`, `--rendezvous`, `--relay`) |
 
 Examples:
 

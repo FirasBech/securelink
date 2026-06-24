@@ -7,9 +7,15 @@ from pathlib import Path
 from typing import Any
 
 from core.discovery import auto_select_transport_mode, discover_peers, tailscale_peers
+from core.settings import Settings, SettingsError, parse_host_port
 from core.stun import StunError, discover_public_endpoint
 from core.transport import TransferStats, TransportConfig, receive_file, send_file
-from core.udp_transport import udp_receive_file, udp_send_file
+from core.udp_transport import (
+    udp_receive_file,
+    udp_send_file,
+    wan_receive_file,
+    wan_send_file,
+)
 from security.capture import JsonEventLogger
 
 def _securelink_root(base_dir: Path | None) -> Path:
@@ -175,6 +181,89 @@ def _cmd_natcheck(args: argparse.Namespace) -> int:
     return 0
 
 
+def _coordination_endpoints(
+    args: argparse.Namespace, base_dir: Path | None
+) -> tuple[tuple[str, int], tuple[str, int] | None]:
+    """Resolve rendezvous (required) and relay (optional) from flags or settings."""
+    settings = Settings.load(base_dir)
+    rendezvous_text = getattr(args, "rendezvous", None) or settings.rendezvous
+    relay_text = getattr(args, "relay", None) or settings.relay
+    if not rendezvous_text:
+        raise SettingsError(
+            "no rendezvous server set. Pass --rendezvous host:port or configure one "
+            "(SecureLink bundles none; you host your own)."
+        )
+    rendezvous_addr = parse_host_port(rendezvous_text)
+    relay_addr = parse_host_port(relay_text) if relay_text else None
+    return rendezvous_addr, relay_addr
+
+
+def _cmd_wansend(args: argparse.Namespace) -> int:
+    base_dir = _base_dir(args)
+    try:
+        rendezvous_addr, relay_addr = _coordination_endpoints(args, base_dir)
+    except SettingsError as exc:
+        print(json.dumps({"status": "error", "message": str(exc)}, indent=2))
+        return 1
+    config = TransportConfig(mode="wan", allow_unknown=args.allow_unknown)
+    stats = wan_send_file(
+        args.file,
+        rendezvous_addr=rendezvous_addr,
+        token=args.token,
+        relay_addr=relay_addr,
+        config=config,
+        trust_prompt=_prompt_trust,
+        base_dir=base_dir,
+    )
+    _update_state(stats, "send", base_dir)
+    print(json.dumps({"status": "sent", "bytes": stats.bytes_transferred, "chunks": stats.chunks}, indent=2))
+    return 0
+
+
+def _cmd_wanrecv(args: argparse.Namespace) -> int:
+    base_dir = _base_dir(args)
+    try:
+        rendezvous_addr, relay_addr = _coordination_endpoints(args, base_dir)
+    except SettingsError as exc:
+        print(json.dumps({"status": "error", "message": str(exc)}, indent=2))
+        return 1
+    config = TransportConfig(
+        mode="wan",
+        allow_unknown=args.allow_unknown,
+        allowlist=tuple(args.allowlist or ()),
+        output_dir=Path(args.output_dir),
+    )
+    output_path, stats = wan_receive_file(
+        rendezvous_addr=rendezvous_addr,
+        token=args.token,
+        relay_addr=relay_addr,
+        config=config,
+        trust_prompt=_prompt_trust,
+        base_dir=base_dir,
+    )
+    _update_state(stats, "recv", base_dir)
+    print(json.dumps({"status": "received", "path": str(output_path), "bytes": stats.bytes_transferred, "chunks": stats.chunks}, indent=2))
+    return 0
+
+
+def _cmd_settings(args: argparse.Namespace) -> int:
+    base_dir = _base_dir(args)
+    settings = Settings.load(base_dir)
+    changed = False
+    for field in ("rendezvous", "relay", "stun_host"):
+        value = getattr(args, field, None)
+        if value is not None:
+            setattr(settings, field, value or None)  # empty string clears it
+            changed = True
+    if args.stun_port is not None:
+        settings.stun_port = args.stun_port or None
+        changed = True
+    if changed:
+        settings.save(base_dir)
+    print(json.dumps(settings.as_dict(), indent=2))
+    return 0
+
+
 def _serve_forever(server: Any, kind: str) -> int:
     import threading
 
@@ -255,6 +344,36 @@ def build_parser() -> argparse.ArgumentParser:
     )
     natcheck_parser.add_argument("--timeout", type=float, default=3.0)
     natcheck_parser.set_defaults(func=_cmd_natcheck)
+
+    wansend_parser = subparsers.add_parser(
+        "wansend", help="send a file over the internet via a coordination server (you host it)", parents=[common]
+    )
+    wansend_parser.add_argument("file", help="file to transfer")
+    wansend_parser.add_argument("--token", required=True, help="shared token both peers agree on")
+    wansend_parser.add_argument("--rendezvous", default=None, help="host:port (overrides settings)")
+    wansend_parser.add_argument("--relay", default=None, help="host:port relay fallback (overrides settings)")
+    wansend_parser.add_argument("--allow-unknown", action="store_true")
+    wansend_parser.set_defaults(func=_cmd_wansend)
+
+    wanrecv_parser = subparsers.add_parser(
+        "wanrecv", help="receive a file over the internet via a coordination server", parents=[common]
+    )
+    wanrecv_parser.add_argument("--token", required=True, help="shared token both peers agree on")
+    wanrecv_parser.add_argument("--rendezvous", default=None, help="host:port (overrides settings)")
+    wanrecv_parser.add_argument("--relay", default=None, help="host:port relay fallback (overrides settings)")
+    wanrecv_parser.add_argument("--output-dir", default=str(Path.cwd()))
+    wanrecv_parser.add_argument("--allowlist", nargs="*", default=[])
+    wanrecv_parser.add_argument("--allow-unknown", action="store_true")
+    wanrecv_parser.set_defaults(func=_cmd_wanrecv)
+
+    settings_parser = subparsers.add_parser(
+        "settings", help="show or set your coordination-server settings (BYO; none bundled)", parents=[common]
+    )
+    settings_parser.add_argument("--rendezvous", default=None, help="set rendezvous host:port ('' clears)")
+    settings_parser.add_argument("--relay", default=None, help="set relay host:port ('' clears)")
+    settings_parser.add_argument("--stun-host", dest="stun_host", default=None)
+    settings_parser.add_argument("--stun-port", dest="stun_port", type=int, default=None)
+    settings_parser.set_defaults(func=_cmd_settings)
 
     rendezvous_parser = subparsers.add_parser(
         "rendezvous", help="run a rendezvous server (endpoint matchmaker for hole punching)", parents=[common]

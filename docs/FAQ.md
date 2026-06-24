@@ -59,6 +59,17 @@ Two ways:
   yourself (`python -m ui.cli rendezvous` / `relay`); they aren't yet wired into
   the one-click send/receive flow.
 
+### Does SecureLink use anyone's server? Do I have to trust a third party?
+
+No. SecureLink **bundles no server** and phones home to nothing. LAN, VLAN, and
+VPN transfers are fully peer-to-peer. For internet (WAN) transfers through NATs
+you *may* optionally use a coordination server — but **you bring your own**: host
+the `rendezvous` (and, for symmetric NATs, `relay`) commands on a machine you
+control, then point SecureLink at them with `settings --rendezvous host:port`
+(or the dashboard's Settings tab). Leave them unset and you simply don't use
+coordination — VPN remains the easiest internet path. (STUN, used only to learn
+your public address, defaults to Google's public servers and is overridable.)
+
 ### Do I need a Tailscale account to use VPN mode?
 
 Yes — Tailscale is a separate product with its own sign-in. **Each user installs

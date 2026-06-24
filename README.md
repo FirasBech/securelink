@@ -258,6 +258,14 @@ python -m ui.cli natcheck
 python -m ui.cli rendezvous --port 6000   # endpoint matchmaker for hole punching
 python -m ui.cli relay --port 6001        # UDP relay fallback for symmetric NATs
 
+# Point SecureLink at YOUR coordination servers (bring-your-own; none are bundled)
+python -m ui.cli settings --rendezvous my.server:6000 --relay my.server:6001
+python -m ui.cli settings                  # show current settings
+
+# Internet transfer via the coordination server, both sides agree on a token
+python -m ui.cli wanrecv --token alice-bob          # on the receiver
+python -m ui.cli wansend report.pdf --token alice-bob  # on the sender
+
 # Isolate identity/known_hosts/session/logs under a chosen directory
 python -m ui.cli --help  # --state-dir is available on every subcommand
 python -m ui.cli status --state-dir ./demo-state
