@@ -184,6 +184,40 @@ def test_internet_receive_routes_through_coordination_when_token_set(tmp_path, m
         app.quit()
 
 
+def test_received_files_panel_lists_arrivals(tmp_path) -> None:
+    from PyQt5.QtCore import Qt
+
+    app = QApplication.instance() or QApplication([])
+    window = DashboardWindow(auto_refresh=False)
+
+    # Starts with just the placeholder hint, no real entries.
+    assert window.received_list.count() == 1
+    assert window.received_list.item(0).data(Qt.UserRole) is None
+
+    got = tmp_path / "report.pdf"
+    got.write_bytes(b"x" * 1234)
+    window._on_receive_finished(str(got), 1234, 3)
+
+    # Placeholder replaced by one real, openable entry (newest first).
+    assert window.received_list.count() == 1
+    item = window.received_list.item(0)
+    assert item.data(Qt.UserRole) == str(got)
+    assert "report.pdf" in item.text()
+    assert item.toolTip() == str(got)
+
+    # A second arrival stacks on top.
+    other = tmp_path / "photo.png"
+    other.write_bytes(b"y" * 10)
+    window._on_receive_finished(str(other), 10, 1)
+    assert window.received_list.count() == 2
+    assert window.received_list.item(0).data(Qt.UserRole) == str(other)
+
+    window.close()
+    window.deleteLater()
+    if app is not None:
+        app.quit()
+
+
 def test_dashboard_tailscale_hint_and_pulse() -> None:
     app = QApplication.instance() or QApplication([])
     window = DashboardWindow(auto_refresh=False)

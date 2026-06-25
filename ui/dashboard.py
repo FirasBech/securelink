@@ -5,13 +5,15 @@ import sys
 import threading
 import time
 import traceback
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
 from PyQt5.QtCore import (
     QEasingCurve,
+    QFileInfo,
     QPropertyAnimation,
+    QSize,
     Qt,
     QTimer,
     QUrl,
@@ -24,6 +26,7 @@ from PyQt5.QtWidgets import (
     QComboBox,
     QDialog,
     QFileDialog,
+    QFileIconProvider,
     QFrame,
     QGraphicsOpacityEffect,
     QGridLayout,
@@ -32,6 +35,8 @@ from PyQt5.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMessageBox,
     QProgressBar,
@@ -573,6 +578,25 @@ class DashboardWindow(QMainWindow):
                 padding: 6px 4px;
                 font-weight: 600;
             }
+            QListWidget#ReceivedList {
+                background: #0f172a;
+                color: #e2e8f0;
+                border: 1px solid #334155;
+                border-radius: 8px;
+                padding: 4px;
+                outline: none;
+            }
+            QListWidget#ReceivedList::item {
+                padding: 6px 8px;
+                border-radius: 6px;
+            }
+            QListWidget#ReceivedList::item:selected {
+                background: #1d4ed8;
+                color: #ffffff;
+            }
+            QListWidget#ReceivedList::item:hover {
+                background: #1e293b;
+            }
             QPushButton#CollapseHeader:hover {
                 color: #e2e8f0;
                 background: transparent;
@@ -846,6 +870,60 @@ class DashboardWindow(QMainWindow):
         button_row.addWidget(self.receive_status_label, 1)
         parent_layout.addLayout(button_row)
 
+        # Received-files list: what arrived, where, with the OS file-type icon.
+        received_row = QHBoxLayout()
+        received_header = QLabel("Received files")
+        received_header.setObjectName("PanelHint")
+        received_row.addWidget(received_header)
+        received_row.addStretch(1)
+        open_folder_button = QPushButton("Open download folder")
+        open_folder_button.clicked.connect(self._open_download_folder)
+        open_folder_button.setToolTip("Open the folder where received files are saved.")
+        received_row.addWidget(open_folder_button)
+        parent_layout.addLayout(received_row)
+
+        self._icon_provider = QFileIconProvider()
+        self.received_list = QListWidget()
+        self.received_list.setObjectName("ReceivedList")
+        self.received_list.setIconSize(QSize(28, 28))
+        self.received_list.setMinimumHeight(150)
+        self.received_list.setToolTip("Double-click a file to open it.")
+        self.received_list.itemDoubleClicked.connect(self._open_received_item)
+        self._received_empty_hint = QListWidgetItem("Received files will appear here.")
+        self._received_empty_hint.setFlags(Qt.NoItemFlags)
+        self.received_list.addItem(self._received_empty_hint)
+        parent_layout.addWidget(self.received_list)
+
+    def _open_download_folder(self) -> None:
+        folder = self.recv_output_edit.text().strip() or str(Path.cwd())
+        QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
+
+    def _open_received_item(self, item: QListWidgetItem) -> None:
+        path = item.data(Qt.UserRole)
+        if path:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+
+    def _add_received_file(self, path: str) -> None:
+        # Drop the "appear here" placeholder on the first real entry.
+        if self._received_empty_hint is not None:
+            row = self.received_list.row(self._received_empty_hint)
+            if row >= 0:
+                self.received_list.takeItem(row)
+            self._received_empty_hint = None
+
+        file_path = Path(path)
+        icon = self._icon_provider.icon(QFileInfo(str(file_path)))
+        try:
+            size = file_path.stat().st_size
+        except OSError:
+            size = 0
+        when = datetime.now().strftime("%H:%M")
+        item = QListWidgetItem(icon, f"{file_path.name}    {_human_bytes(size)} · {when}")
+        item.setData(Qt.UserRole, str(file_path))
+        item.setToolTip(str(file_path))
+        self.received_list.insertItem(0, item)  # newest on top
+        self.received_list.setCurrentRow(0)
+
     def choose_output_dir(self) -> None:
         directory = QFileDialog.getExistingDirectory(
             self,
@@ -967,8 +1045,9 @@ class DashboardWindow(QMainWindow):
         self._reset_receive_button()
         name = Path(path).name
         self.receive_status_label.setText(
-            f"Received {name} ({bytes_received} bytes, {chunks} chunk(s))"
+            f"Received {name} ({_human_bytes(bytes_received)}, {chunks} chunk(s))"
         )
+        self._add_received_file(path)
         self.status_changed.emit(f"Received {name}")
         self.refresh_logs()
 

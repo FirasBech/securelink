@@ -118,6 +118,9 @@ under a collapsed **Advanced options** toggle so the common case stays simple.
 5. Click **Start Listening.** The button becomes **Stop**; the status shows
    "Listening…" then "Received …" when a file arrives. Each start handles one
    incoming transfer.
+6. Arrivals appear in the **Received files** list below (with the file's icon,
+   size and time). Double-click an entry to open the file, or use **Open download
+   folder** to open the save location.
 
 ### Internet servers (Settings tab)
 
