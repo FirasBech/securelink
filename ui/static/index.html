@@ -1,0 +1,318 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SecureLink — Web UI</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+    background: #0f172a;
+    color: #e2e8f0;
+    margin: 0;
+    padding: 24px;
+  }
+  .card {
+    background: #1e293b;
+    border: 1px solid #334155;
+    border-radius: 12px;
+    padding: 20px;
+    margin-bottom: 20px;
+    max-width: 700px;
+  }
+  h1 { margin: 0 0 8px; font-size: 20px; letter-spacing: -0.5px; }
+  h2 { margin: 0 0 12px; font-size: 16px; color: #94a3b8; }
+  p.note { color: #94a3b8; font-size: 13px; margin: 0 0 16px; }
+  label { display: block; font-size: 13px; color: #cbd5e1; margin-bottom: 6px; }
+  input, select, textarea {
+    width: 100%;
+    background: #0f172a;
+    color: #e2e8f0;
+    border: 1px solid #334155;
+    border-radius: 8px;
+    padding: 8px 10px;
+    font-size: 14px;
+    margin-bottom: 12px;
+  }
+  input:focus { outline: none; border-color: #3b82f6; }
+  button {
+    background: #2563eb;
+    color: #fff;
+    border: none;
+    border-radius: 8px;
+    padding: 9px 16px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    margin-right: 8px;
+  }
+  button:hover { background: #3b82f6; }
+  button:disabled { background: #334155; color: #64748b; cursor: not-allowed; }
+  button.danger { background: #dc2626; }
+  button.danger:hover { background: #ef4444; }
+  button.secondary { background: #334155; }
+  button.secondary:hover { background: #475569; }
+  .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: flex-end; }
+  .col { flex: 1; min-width: 140px; }
+  .full { width: 100%; }
+  .badge {
+    display: inline-block;
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 10px;
+    background: #334155;
+    color: #94a3b8;
+    margin-right: 6px;
+  }
+  .badge.ok { background: #166534; color: #bbf7d0; }
+  .badge.err { background: #991b1b; color: #fecaca; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 8px; }
+  th { text-align: left; color: #94a3b8; padding: 8px; border-bottom: 1px solid #334155; }
+  td { padding: 8px; border-bottom: 1px solid #334155; color: #cbd5e1; }
+  tr:hover td { background: #172033; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; }
+  #status { margin-top: 12px; padding: 10px; border-radius: 8px; background: #1e293b; border: 1px solid #334155; }
+  #status.ok { border-color: #16a34a; color: #86efac; }
+  #status.err { border-color: #dc2626; color: #fca5a5; }
+  .hint { color: #94a3b8; font-size: 12px; margin-top: 6px; }
+</style>
+</head>
+<body>
+
+<h1>SecureLink</h1>
+<p class="note">Send and receive files securely across LAN, VLAN, VPN, and WAN — from your browser.</p>
+
+<div class="card">
+  <h2>Send file(s)</h2>
+  <div class="row">
+    <div class="col">
+      <label>File(s)</label>
+      <input type="file" id="sendFiles" multiple>
+    </div>
+    <div class="col">
+      <label>Peer address</label>
+      <input type="text" id="peerHost" placeholder="192.168.1.20">
+    </div>
+    <div class="col" style="min-width: 90px;">
+      <label>Port</label>
+      <input type="number" id="peerPort" value="55000" min="1" max="65535">
+    </div>
+  </div>
+  <div class="row">
+    <div class="col">
+      <label>Mode</label>
+      <select id="sendMode">
+        <option>auto</option>
+        <option>lan</option>
+        <option>vpn</option>
+        <option>wan</option>
+      </select>
+    </div>
+    <div class="col">
+      <label>Internet token (WAN)</label>
+      <input type="text" id="sendToken" placeholder="shared word">
+    </div>
+  </div>
+  <button class="full" onclick="sendFiles()">Send files</button>
+  <p class="hint">Pick one or more files, enter the receiver's address, then click Send files.</p>
+</div>
+
+<div class="card">
+  <h2>Receive file(s)</h2>
+  <div class="row">
+    <div class="col">
+      <label>Port</label>
+      <input type="number" id="recvPort" value="55000" min="1" max="65535">
+    </div>
+    <div class="col">
+      <label>Save to</label>
+      <input type="text" id="recvDir" value=".">
+    </div>
+    <div class="col" style="min-width: 90px;">
+      <label>Mode</label>
+      <select id="recvMode">
+        <option>lan</option>
+        <option>wan</option>
+      </select>
+    </div>
+  </div>
+  <div class="row">
+    <div class="col" style="min-width: 200px;">
+      <label>Allowlist (comma-separated IPs)</label>
+      <input type="text" id="recvAllowlist" placeholder="192.168.1.0/24">
+    </div>
+    <div class="col">
+      <label>Internet token (WAN)</label>
+      <input type="text" id="recvToken" placeholder="shared word">
+    </div>
+  </div>
+  <button id="recvBtn" onclick="toggleReceive()" class="full">Start listening</button>
+  <p class="hint">Click Start listening, then give the sender the address shown below.</p>
+</div>
+
+<div id="status"></div>
+
+<div class="card">
+  <h2>Your address</h2>
+  <div id="yourAddr" class="mono">Detecting…</div>
+  <button class="secondary" onclick="refreshPeers()">Refresh peers</button>
+  <div id="peers" style="margin-top: 10px;"></div>
+</div>
+
+<div class="card">
+  <h2>Transfer history</h2>
+  <table id="historyTable">
+    <thead>
+      <tr><th>Time</th><th>Direction</th><th>File</th><th>Bytes</th><th>Status</th><th>Peer</th></tr>
+    </thead>
+    <tbody id="historyBody"><tr><td colspan="6" style="text-align:center;color:#94a3b8;">Loading…</td></tr></tbody>
+  </table>
+  <button class="secondary" onclick="loadHistory()">Refresh</button>
+</div>
+
+<script>
+const API = "/api";
+let listening = false;
+
+function el(id){ return document.getElementById(id); }
+
+async function json(path, opts = {}){
+  const res = await fetch(API + path, {
+    method: opts.method || "GET",
+    headers: opts.body ? { "Content-Type": "application/json" } : {},
+    body: opts.body ? JSON.stringify(opts.body) : undefined,
+  });
+  return res.json();
+}
+
+function setStatus(text, kind){
+  const s = el("status");
+  s.textContent = text;
+  s.className = kind === "err" ? "status err" : kind === "ok" ? "status ok" : "status";
+  s.style.display = text ? "block" : "none";
+}
+
+async function sendFiles(){
+  const input = el("sendFiles");
+  if (!input.files || input.files.length === 0){
+    setStatus("Choose at least one file.", "err");
+    return;
+  }
+  const files = Array.from(input.files).map(f => f.name); // browsers expose names only; real paths come from backend file pickers
+  const body = {
+    paths: files,
+    peer_host: el("peerHost").value || "127.0.0.1",
+    peer_port: parseInt(el("peerPort").value || "55000", 10),
+    mode: el("sendMode").value,
+    token: el("sendToken").value || undefined,
+  };
+  setStatus("Sending…");
+  try {
+    const result = await json("/send", { method: "POST", body });
+    if (result.error) { setStatus("Send failed: " + result.error, "err"); return; }
+    setStatus("Sent " + result.bytes_transferred + " bytes (" + result.chunks + " chunk" + (result.chunks===1?"":"s") + ")", "ok");
+    input.value = "";
+    loadHistory();
+  } catch (e) {
+    setStatus("Send failed: " + e, "err");
+  }
+}
+
+async function toggleReceive(){
+  if (listening){
+    try { await json("/receive_stop", { method: "POST" }); } catch(e){}
+    listening = false;
+    el("recvBtn").textContent = "Start listening";
+    el("recvBtn").className = el("recvBtn").className.replace(" danger","");
+    setStatus("Stopped listening.");
+    return;
+  }
+  const body = {
+    peer_port: parseInt(el("recvPort").value || "55000", 10),
+    output_dir: el("recvDir").value || ".",
+    mode: el("recvMode").value,
+    allowlist: el("recvAllowlist").value,
+    token: el("recvToken").value || undefined,
+  };
+  setStatus("Starting listener…");
+  try {
+    const result = await json("/receive", { method: "POST", body });
+    if (result.error) { setStatus("Listen failed: " + result.error, "err"); return; }
+    listening = true;
+    el("recvBtn").textContent = "Stop listening";
+    el("recvBtn").className += " danger";
+    setStatus("Listening on port " + result.port + " (" + result.mode + ").", "ok");
+    // poll briefly for completion
+    setTimeout(pollReceive, 2000);
+  } catch (e) {
+    setStatus("Listen failed: " + e, "err");
+  }
+}
+
+async function pollReceive(){
+  if (!listening) return;
+  // The server runs receive in a thread; the browser can't get push events,
+  // so we just keep the "listening" state. History refreshes on demand.
+  setTimeout(pollReceive, 5000);
+}
+
+async function refreshPeers(){
+  try {
+    const data = await json("/peers");
+    const box = el("peers");
+    if (data.error) { box.innerHTML = "<div style='color:#fca5a5;'>Peer scan: " + data.error + "</div>"; return; }
+    if (!data.peers || data.peers.length === 0){
+      box.innerHTML = "<div style='color:#94a3b8;'>No peers found on LAN.</div>";
+      return;
+    }
+    box.innerHTML = data.peers.map(p =>
+      "<div style='margin:4px 0;'><span class='badge " + (p.trusted?"ok":"") + "'>" + (p.source||"lan") + "</span>" +
+      "<b>" + (p.name||"peer") + "</b> " + p.address + ":" + p.port +
+      (p.vlan_id != null ? " · vlan " + p.vlan_id : "") + "</div>"
+    ).join("");
+  } catch (e) {
+    el("peers").innerHTML = "<div style='color:#fca5a5;'>Peer scan failed.</div>";
+  }
+}
+
+async function loadHistory(){
+  try {
+    const data = await json("/history?limit=50");
+    const tbody = el("historyBody");
+    if (data.error) { tbody.innerHTML = "<tr><td colspan='6' style='color:#fca5a5;'>" + data.error + "</td></tr>"; return; }
+    const records = data.records || [];
+    if (records.length === 0){
+      tbody.innerHTML = "<tr><td colspan='6' style='text-align:center;color:#94a3b8;'>No transfers yet.</td></tr>";
+      return;
+    }
+    tbody.innerHTML = records.map(r =>
+      "<tr>" +
+      "<td class='mono'>" + (r.timestamp||"").slice(0,16).replace("T"," ") + "</td>" +
+      "<td><span class='badge " + (r.direction==="send"?"ok":"") + "'>" + r.direction + "</span></td>" +
+      "<td>" + (r.file||"-") + "</td>" +
+      "<td class='mono'>" + (r.bytes_transferred||0) + "</td>" +
+      "<td><span class='badge " + (r.status==="ok"?"ok":"err") + "'>" + r.status + "</span></td>" +
+      "<td>" + (r.peer||"-") + "</td>" +
+      "</tr>"
+    ).join("");
+  } catch (e) {
+    el("historyBody").innerHTML = "<tr><td colspan='6' style='color:#fca5a5;'>History load failed.</td></tr>";
+  }
+}
+
+// Detect local addresses on load.
+(async () => {
+  try {
+    const data = await json("/peers");
+    el("yourAddr").textContent = "See peers above (this machine advertises its mDNS address).";
+  } catch (e) {
+    el("yourAddr").textContent = "Address detection unavailable.";
+  }
+})();
+
+loadHistory();
+</script>
+
+</body>
+</html>

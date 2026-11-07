@@ -321,6 +321,15 @@ def _cmd_history(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_web(args: argparse.Namespace) -> int:
+    """Start the SecureLink web UI (browser-based file transfer)."""
+
+    from ui.web_ui import run_web_ui
+
+    run_web_ui(host=args.host, port=args.port)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="securelink")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -426,6 +435,11 @@ def build_parser() -> argparse.ArgumentParser:
     history_parser = subparsers.add_parser("history", help="list recent transfer history", parents=[common])
     history_parser.add_argument("--limit", type=int, default=20)
     history_parser.set_defaults(func=_cmd_history)
+
+    web_parser = subparsers.add_parser("web", help="run the SecureLink web UI (browser-based)", parents=[common])
+    web_parser.add_argument("--host", default="127.0.0.1", help="host to bind (localhost only by design)")
+    web_parser.add_argument("--port", type=int, default=8080, help="port to serve the web UI on")
+    web_parser.set_defaults(func=_cmd_web)
 
     return parser
 
