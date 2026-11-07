@@ -13,7 +13,7 @@ def _list_tool_names() -> list[str]:
 
 def test_mcp_server_registers_securelink_tools() -> None:
     names = _list_tool_names()
-    assert {"scan_peers", "natcheck", "send_file", "status", "transfer_history"} <= set(names)
+    assert {"scan_peers", "natcheck", "send_file", "status", "transfer_history", "retry_transfer"} <= set(names)
 
 
 def test_mcp_status_returns_json() -> None:

@@ -142,6 +142,56 @@ def transfer_history(limit: int = 20) -> str:
     return json.dumps(list_transfers(limit=limit))
 
 
+@mcp.tool(description="Retry a failed transfer recorded in the durable history (send or receive).")
+def retry_transfer(
+    direction: str,
+    file_path: str,
+    peer_host: str | None = None,
+    peer_port: int = 55000,
+    token: str | None = None,
+    mode: str | None = None,
+) -> str:
+    """Retry a previously failed transfer.
+
+    ``direction`` is ``"send"`` (re-send ``file_path`` to ``peer_host:peer_port``)
+    or ``"recv"`` (re-listen for a peer to deliver ``file_path``).
+    """
+
+    from core.history import list_transfers
+
+    if direction == "send":
+        if token:
+            from core.settings import Settings
+            from core.udp_transport import wan_send_file
+
+            settings = Settings()
+            rendezvous = settings.rendezvous_addr()
+            if rendezvous is None:
+                return json.dumps({"error": "no rendezvous configured; cannot retry WAN send"})
+            parsed = rendezvous
+            stats = wan_send_file(
+                file_path,
+                parsed,
+                rendezvous_addr=parsed,
+                token=token,
+            )
+            return json.dumps({"retried": True, "direction": "send", "bytes_transferred": stats.bytes_transferred})
+        from core.transport import send_file
+
+        config = TransportConfig(mode=(mode or "auto"), port=peer_port)
+        stats = send_file(file_path, peer_host or "127.0.0.1", config=config)
+        return json.dumps({"retried": True, "direction": "send", "bytes_transferred": stats.bytes_transferred})
+
+    if direction == "recv":
+        from core.transport import receive_file
+
+        config = TransportConfig(mode=(mode or "lan"), port=peer_port, output_dir=Path.cwd())
+        path, stats = receive_file(config=config)
+        return json.dumps({"retried": True, "direction": "recv", "bytes_transferred": stats.bytes_transferred})
+
+    return json.dumps({"error": f"unknown direction {direction!r}; expected 'send' or 'recv'"})
+
+
 def _auto_mode(peer_host: str) -> str:
     from core.discovery import auto_select_transport_mode
 
