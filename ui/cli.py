@@ -302,6 +302,15 @@ def _cmd_mcp(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_history(args: argparse.Namespace) -> int:
+    from core.history import list_transfers
+
+    transfers = list_transfers(base_dir=_base_dir(args), limit=args.limit)
+    for record in transfers:
+        print(json.dumps(record, sort_keys=True))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="securelink")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -402,6 +411,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     mcp_parser = subparsers.add_parser("mcp", help="run the SecureLink MCP server (agent tools)")
     mcp_parser.set_defaults(func=_cmd_mcp)
+
+    history_parser = subparsers.add_parser("history", help="list recent transfer history", parents=[common])
+    history_parser.add_argument("--limit", type=int, default=20)
+    history_parser.set_defaults(func=_cmd_history)
 
     return parser
 

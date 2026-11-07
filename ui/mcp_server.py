@@ -133,6 +133,15 @@ def status() -> str:
     return json.dumps(_load_session_state())
 
 
+@mcp.tool(description="List recent transfer history / receipts.")
+def transfer_history(limit: int = 20) -> str:
+    """Return the most recent transfer records from the durable history."""
+
+    from core.history import list_transfers
+
+    return json.dumps(list_transfers(limit=limit))
+
+
 def _auto_mode(peer_host: str) -> str:
     from core.discovery import auto_select_transport_mode
 
