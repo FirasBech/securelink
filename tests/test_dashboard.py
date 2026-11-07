@@ -184,6 +184,46 @@ def test_internet_receive_routes_through_coordination_when_token_set(tmp_path, m
         app.quit()
 
 
+def test_transfer_progress_updates_bar_and_detail() -> None:
+    app = QApplication.instance() or QApplication([])
+    window = DashboardWindow(auto_refresh=False)
+    window._transfer_start = time.monotonic()
+    window._active_item = "report.pdf"
+
+    window._on_transfer_progress(512, 1024)
+    assert window.progress_bar.value() == 50
+    assert "report.pdf" in window.transfer_detail_label.text()
+    assert "512" in window.transfer_detail_label.text()
+
+    window._on_transfer_progress(1024, 1024)
+    assert window.progress_bar.value() == 100
+
+    window._on_transfer_finished("report.pdf", 1024, 1)
+    assert window.progress_bar.value() == 100
+    assert "Sent" in window.transfer_detail_label.text()
+    assert window.status_label.text()
+
+    window.close()
+    window.deleteLater()
+    if app is not None:
+        app.quit()
+
+
+def test_transfer_failed_shows_message(monkeypatch) -> None:
+    app = QApplication.instance() or QApplication([])
+    window = DashboardWindow(auto_refresh=False)
+    monkeypatch.setattr(QMessageBox, "critical", staticmethod(lambda *a, **k: None))
+
+    window._on_transfer_failed("boom")
+    assert window.transfer_detail_label.text() == "Transfer failed"
+    assert window.progress_bar.value() == 0
+
+    window.close()
+    window.deleteLater()
+    if app is not None:
+        app.quit()
+
+
 def test_received_files_panel_lists_arrivals(tmp_path) -> None:
     from PyQt5.QtCore import Qt
 
