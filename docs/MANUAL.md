@@ -143,6 +143,10 @@ and `python -m ui.cli relay`.
   toggle to narrow it. The summary reads "shown / total events".
 - **Security Alerts** panel lists security alerts, color-coded by severity (HIGH = red,
   MEDIUM = amber).
+- **Internet (WAN) path** panel has a **Check NAT type** button that probes STUN to
+  classify this host's NAT (cone/open vs symmetric) and reports whether direct WAN
+  hole punching will likely work; symmetric NATs should use the relay or a VPN. This
+  complements the `natcheck` CLI command.
 
 ---
 

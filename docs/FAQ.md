@@ -57,7 +57,10 @@ Two ways:
   servers yourself (`python -m ui.cli rendezvous` / `relay`), point SecureLink at
   them on the **Settings** tab, then transfer by entering the same **Internet
   token** on both sides — in the dashboard's Send/Receive tabs (Advanced
-  options) or via `wansend` / `wanrecv` on the CLI.
+  options) or via `wansend` / `wanrecv` on the CLI. The dashboard's
+  **Network - Internet (WAN) path - Check NAT type** button runs the same
+  STUN-based classification and reports whether hole punching should work
+  on your network (symmetric NATs should use the relay or a VPN instead).
 
 - **Plain WAN.** Also works **if the receiver's UDP port is reachable** (e.g.
   port-forwarded) — tick **WAN** and use the address directly, no server needed.

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import socket
 import sys
 import threading
 import time
@@ -12,6 +14,7 @@ from typing import Any
 from PyQt5.QtCore import (
     QEasingCurve,
     QFileInfo,
+    QMimeData,
     QPropertyAnimation,
     QSize,
     Qt,
@@ -21,6 +24,7 @@ from PyQt5.QtCore import (
 )
 from PyQt5.QtGui import QColor, QDesktopServices, QFont, QIcon
 from PyQt5.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QCheckBox,
     QComboBox,
@@ -52,20 +56,73 @@ from PyQt5.QtWidgets import (
 )
 
 from core.discovery import (
+    PeerAdvertiser,
     auto_select_transport_mode,
     discover_peers,
     local_reachable_addresses,
     tailscale_peers,
     tailscale_state,
 )
+from core.nat import NatError, detect_nat_mapping
 from core.settings import Settings, SettingsError, parse_host_port
-from core.transport import TransportConfig, receive_file, send_file
-from core.udp_transport import (
-    udp_receive_file,
-    udp_send_file,
-    wan_receive_file,
-    wan_send_file,
+from core.transport import (
+    TransportConfig,
+    collect_transfer_items,
+    receive_paths,
+    send_paths,
 )
+from core.udp_transport import (
+    udp_receive_paths,
+    udp_send_paths,
+    wan_receive_paths,
+    wan_send_paths,
+)
+
+
+def wan_send_file(
+    file_path: str | Path | list[str | Path],
+    *,
+    rendezvous_addr: tuple[str, int],
+    token: str,
+    relay_addr: tuple[str, int] | None = None,
+    **kwargs: Any,
+) -> TransferStats:
+    """Send file(s) over a coordination server (rendezvous + optional relay).
+
+    Module-level entry point for the WAN send path, so tests can monkeypatch it.
+    Delegates to :func:`core.udp_transport.wan_send_paths`.
+    """
+
+    return wan_send_paths(
+        file_path,
+        rendezvous_addr=rendezvous_addr,
+        token=token,
+        relay_addr=relay_addr,
+        **kwargs,
+    )
+
+
+def wan_receive_file(
+    *,
+    rendezvous_addr: tuple[str, int],
+    token: str,
+    relay_addr: tuple[str, int] | None = None,
+    **kwargs: Any,
+) -> tuple[Path, TransferStats]:
+    """Receive a single file over a coordination server (rendezvous + optional relay).
+
+    Module-level entry point for the WAN receive path, so tests can monkeypatch it.
+    Delegates to :func:`core.udp_transport.wan_receive_paths`.
+    """
+
+    paths, stats = wan_receive_paths(
+        rendezvous_addr=rendezvous_addr,
+        token=token,
+        relay_addr=relay_addr,
+        **kwargs,
+    )
+    return (paths[0] if paths else Path.cwd()), stats
+
 
 LOG_DIR = Path.home() / ".securelink" / "logs"
 ICON_PATH = Path(__file__).resolve().parents[1] / "assets" / "securelink.ico"
@@ -138,6 +195,62 @@ def _human_bytes(value: float) -> str:
     return f"{size:.1f} GB"
 
 
+def _source_label(source: str) -> str:
+    return {
+        "mdns": "LAN / mDNS",
+        "tailscale": "Tailscale / VPN",
+        "manual": "Manual",
+    }.get(source, source or "LAN / mDNS")
+
+
+class FileDropList(QListWidget):
+    """A list that accepts files and folders dragged from the OS.
+
+    Dropping onto the list (or anywhere on the window) queues every local path;
+    the dashboard then expands folders when the transfer starts.
+    """
+
+    paths_dropped = pyqtSignal(object)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+        self.setDragDropMode(QAbstractItemView.DropOnly)
+        self.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.setDefaultDropAction(Qt.CopyAction)
+
+    @staticmethod
+    def _local_paths(mime: QMimeData) -> list[str]:
+        if not mime.hasUrls():
+            return []
+        return [
+            url.toLocalFile()
+            for url in mime.urls()
+            if url.isLocalFile() and url.toLocalFile()
+        ]
+
+    def dragEnterEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+        if self._local_paths(event.mimeData()):
+            event.acceptProposedAction()
+            return
+        super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+        if self._local_paths(event.mimeData()):
+            event.acceptProposedAction()
+            return
+        super().dragMoveEvent(event)
+
+    def dropEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+        paths = self._local_paths(event.mimeData())
+        if paths:
+            self.paths_dropped.emit(paths)
+            event.acceptProposedAction()
+            return
+        super().dropEvent(event)
+
+
+
 def _severity_for_event(payload: dict[str, Any]) -> str:
     event_name = str(payload.get("event") or "event")
     if payload.get("alert"):
@@ -158,23 +271,39 @@ class DashboardWindow(QMainWindow):
     transfer_finished = pyqtSignal(str, int, int)
     transfer_failed = pyqtSignal(str)
     transfer_progress = pyqtSignal(int, int)
-    receive_finished = pyqtSignal(str, int, int)
+    transfer_item = pyqtSignal(str, int, int)
+    receive_finished = pyqtSignal(object, int, int)
     receive_failed = pyqtSignal(str)
+    advertised = pyqtSignal(str, int)
+    nat_state_loaded = pyqtSignal(object)
 
     def __init__(self, auto_refresh: bool = True) -> None:
         super().__init__()
         self._auto_refresh = auto_refresh
         self._peers: list[dict[str, Any]] = []
+        self._peers_refreshing = False
+        self._nat_refreshing = False
+        self._nat_state: dict[str, Any] | None = None
         self._all_log_entries: list[dict[str, Any]] = []
         self._all_alert_entries: list[dict[str, Any]] = []
         self._receive_thread: threading.Thread | None = None
         self._receive_cancel: threading.Event | None = None
         self._settings_base_dir: Path | None = None  # overridable in tests
+        self._send_paths: list[str] = []
+        self._send_list_empty_hint: QListWidgetItem | None = None
+        self._received_empty_hint: QListWidgetItem | None = None
+        self._active_item: str | None = None
+        self._advertiser: PeerAdvertiser | None = None
+        self._advertising_started = False
+        self._advertised_as: tuple[str, int] | None = None
+        self._local_addresses: list[dict[str, Any]] = []
+        self._icon_provider = QFileIconProvider()
         self._build_window()
         self._connect_signals()
         self._configure_refresh()
         if self._auto_refresh:
             self.refresh_peers()
+            self._start_advertising()
         self.refresh_logs()
 
     def _build_window(self) -> None:
@@ -186,6 +315,7 @@ class DashboardWindow(QMainWindow):
         # Keep the minimum modest so the window fits smaller laptop screens;
         # the panels live in scroll areas and adapt instead of being clipped.
         self.setMinimumSize(900, 600)
+        self.setAcceptDrops(True)
         self._apply_styles()
 
         central_widget = QWidget(self)
@@ -230,6 +360,7 @@ class DashboardWindow(QMainWindow):
         tabs.addTab(self._tab_with(self._build_network_panel), "  Network  ")
         tabs.addTab(self._tab_with(self._build_activity_panels), "  Activity  ")
         tabs.addTab(self._tab_with(self._build_settings_panel), "  Settings  ")
+        self.tabs = tabs
 
         root_layout.addWidget(header)
         root_layout.addWidget(tabs, stretch=1)
@@ -578,7 +709,7 @@ class DashboardWindow(QMainWindow):
                 padding: 6px 4px;
                 font-weight: 600;
             }
-            QListWidget#ReceivedList {
+            QListWidget#SendList, QListWidget#ReceivedList {
                 background: #0f172a;
                 color: #e2e8f0;
                 border: 1px solid #334155;
@@ -586,15 +717,15 @@ class DashboardWindow(QMainWindow):
                 padding: 4px;
                 outline: none;
             }
-            QListWidget#ReceivedList::item {
+            QListWidget#SendList::item, QListWidget#ReceivedList::item {
                 padding: 6px 8px;
                 border-radius: 6px;
             }
-            QListWidget#ReceivedList::item:selected {
+            QListWidget#SendList::item:selected, QListWidget#ReceivedList::item:selected {
                 background: #1d4ed8;
                 color: #ffffff;
             }
-            QListWidget#ReceivedList::item:hover {
+            QListWidget#SendList::item:hover, QListWidget#ReceivedList::item:hover {
                 background: #1e293b;
             }
             QPushButton#CollapseHeader:hover {
@@ -637,8 +768,73 @@ class DashboardWindow(QMainWindow):
         self._log_timer = QTimer(self)
         self._log_timer.setInterval(5000)
         self._log_timer.timeout.connect(self.refresh_logs)
+
+        # Keep the peer list live without hammering mDNS: a browse is cheap but
+        # takes ~2s, so 20s is a good balance while the window is open.
+        self._peer_timer = QTimer(self)
+        self._peer_timer.setInterval(20_000)
+        self._peer_timer.timeout.connect(self.refresh_peers)
+
+        # Changing the receive port re-registers the advertised service after a
+        # short pause, so typing "55001" doesn't announce five times.
+        self._advertise_timer = QTimer(self)
+        self._advertise_timer.setSingleShot(True)
+        self._advertise_timer.setInterval(900)
+        self._advertise_timer.timeout.connect(self._update_advertised_port)
+        self.recv_port_spin.valueChanged.connect(
+            lambda _value: self._advertise_timer.start() if self._advertising_started else None
+        )
+
         if self._auto_refresh:
             self._log_timer.start()
+            self._peer_timer.start()
+
+    def _start_advertising(self) -> None:
+        """Announce this app over mDNS so other SecureLink installs see it.
+
+        The announcement runs in a worker thread: zeroconf startup touches the
+        network and must never block the UI. The service is withdrawn again in
+        :meth:`closeEvent`, so peers only list machines that are actually open.
+        """
+
+        if self._advertising_started or self._advertiser is not None:
+            return
+        self._advertising_started = True
+        port = self.recv_port_spin.value()
+
+        def _worker() -> None:
+            try:
+                advertiser = PeerAdvertiser(
+                    port=port,
+                    name=socket.gethostname() or "SecureLink",
+                )
+                advertiser.start()
+            except Exception:
+                self._advertising_started = False
+                self.advertised.emit("", 0)
+                return
+            self._advertiser = advertiser
+            self.advertised.emit(advertiser.instance_name or "", advertiser.port)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _update_advertised_port(self) -> None:
+        """Re-register the mDNS service when the receive port changes."""
+
+        advertiser = self._advertiser
+        if advertiser is None:
+            return
+        port = self.recv_port_spin.value()
+
+        def _worker() -> None:
+            try:
+                advertiser.update_port(port)
+            except Exception:
+                self.advertised.emit("", 0)
+                return
+            self.advertised.emit(advertiser.instance_name or "", advertiser.port)
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     def _connect_signals(self) -> None:
         self.peers_loaded.connect(self._render_peers)
@@ -649,27 +845,58 @@ class DashboardWindow(QMainWindow):
         self.transfer_finished.connect(self._on_transfer_finished)
         self.transfer_failed.connect(self._on_transfer_failed)
         self.transfer_progress.connect(self._on_transfer_progress)
+        self.transfer_item.connect(self._on_transfer_item)
         self.receive_finished.connect(self._on_receive_finished)
         self.receive_failed.connect(self._on_receive_failed)
+        self.advertised.connect(self._on_advertised)
+        self.nat_state_loaded.connect(self._render_nat_state)
 
     def _build_transfer_panel(self, parent_layout: QVBoxLayout) -> None:
-        hint = QLabel("1. Pick a file   2. Choose a device or type its address   3. Send File")
+        hint = QLabel(
+            "Drag files or folders here (or use Add Files / Add Folder), choose a "
+            "device, then click Send Files. Folders keep their structure."
+        )
         hint.setObjectName("PanelHint")
         hint.setWordWrap(True)
         parent_layout.addWidget(hint)
+
+        self.send_list = FileDropList()
+        self.send_list.setObjectName("SendList")
+        self.send_list.setIconSize(QSize(24, 24))
+        self.send_list.setMinimumHeight(130)
+        self.send_list.setToolTip(
+            "Files and folders queued for sending. Drop more here, or select an "
+            "entry and click Remove."
+        )
+        self.send_list.paths_dropped.connect(self.add_send_paths)
+        self._refresh_send_list()
+        parent_layout.addWidget(self.send_list)
+
+        list_buttons = QHBoxLayout()
+        add_files_button = QPushButton("Add Files")
+        add_files_button.clicked.connect(self.choose_file)
+        add_files_button.setToolTip("Choose one or more files to send (multi-select works).")
+        add_folder_button = QPushButton("Add Folder")
+        add_folder_button.clicked.connect(self.choose_folder)
+        add_folder_button.setToolTip("Queue a whole folder; its subfolders are preserved.")
+        self.remove_send_button = QPushButton("Remove")
+        self.remove_send_button.clicked.connect(self.remove_selected_send_paths)
+        self.remove_send_button.setToolTip("Remove the selected entries from the send queue.")
+        self.clear_send_button = QPushButton("Clear")
+        self.clear_send_button.clicked.connect(self.clear_send_paths)
+        self.clear_send_button.setToolTip("Empty the send queue.")
+        list_buttons.addWidget(add_files_button)
+        list_buttons.addWidget(add_folder_button)
+        list_buttons.addWidget(self.remove_send_button)
+        list_buttons.addWidget(self.clear_send_button)
+        list_buttons.addStretch(1)
+        parent_layout.addLayout(list_buttons)
 
         grid = QGridLayout()
         grid.setHorizontalSpacing(10)
         grid.setVerticalSpacing(10)
         grid.setColumnStretch(1, 1)
         grid.setColumnStretch(3, 1)
-
-        self.file_edit = QLineEdit()
-        self.file_edit.setPlaceholderText("Choose a file to send")
-        self.file_edit.setToolTip("The file you want to send.")
-        browse_button = QPushButton("Browse")
-        browse_button.clicked.connect(self.choose_file)
-        browse_button.setToolTip("Pick the file to send.")
 
         self.peer_selector = QComboBox()
         self.peer_selector.currentIndexChanged.connect(self._apply_selected_peer)
@@ -690,17 +917,13 @@ class DashboardWindow(QMainWindow):
         self.peer_port_spin.setValue(55000)
         self.peer_port_spin.setToolTip("The port the receiver is listening on (default 55000).")
 
-        grid.addWidget(QLabel("File"), 0, 0)
-        grid.addWidget(self.file_edit, 0, 1, 1, 2)
-        grid.addWidget(browse_button, 0, 3)
+        grid.addWidget(QLabel("Device"), 0, 0)
+        grid.addWidget(self.peer_selector, 0, 1, 1, 3)
 
-        grid.addWidget(QLabel("Device"), 1, 0)
-        grid.addWidget(self.peer_selector, 1, 1, 1, 3)
-
-        grid.addWidget(QLabel("Address"), 2, 0)
-        grid.addWidget(self.peer_host_edit, 2, 1)
-        grid.addWidget(QLabel("Port"), 2, 2)
-        grid.addWidget(self.peer_port_spin, 2, 3)
+        grid.addWidget(QLabel("Address"), 1, 0)
+        grid.addWidget(self.peer_host_edit, 1, 1)
+        grid.addWidget(QLabel("Port"), 1, 2)
+        grid.addWidget(self.peer_port_spin, 1, 3)
         parent_layout.addLayout(grid)
 
         # Advanced options — collapsed by default so beginners aren't overwhelmed.
@@ -735,6 +958,12 @@ class DashboardWindow(QMainWindow):
             "Settings tab), enter a token and have the receiver use the same one. The "
             "Address/Port above are ignored. Leave blank for local/VPN transfers."
         )
+        self.file_edit = QLineEdit()
+        self.file_edit.setPlaceholderText("or paste a single file path here")
+        self.file_edit.setToolTip(
+            "Single file to send. As an alternative to the queue above, paste one "
+            "file path here and click Send Files."
+        )
 
         adv_header, adv_box = self._make_collapsible("Advanced options")
         adv_grid = QGridLayout(adv_box)
@@ -750,6 +979,12 @@ class DashboardWindow(QMainWindow):
         adv_grid.addWidget(self.allow_unknown_checkbox, 1, 2, 1, 2)
         adv_grid.addWidget(QLabel("Internet token"), 2, 0)
         adv_grid.addWidget(self.send_token_edit, 2, 1, 1, 3)
+        adv_grid.addWidget(QLabel("Single file path"), 3, 0)
+        adv_grid.addWidget(self.file_edit, 3, 1, 1, 2)
+        self.file_browse_button = QPushButton("Browse…")
+        self.file_browse_button.setToolTip("Choose a single file to send.")
+        self.file_browse_button.clicked.connect(self.choose_single_file)
+        adv_grid.addWidget(self.file_browse_button, 3, 3)
         parent_layout.addWidget(adv_header)
         parent_layout.addWidget(adv_box)
 
@@ -757,10 +992,13 @@ class DashboardWindow(QMainWindow):
         self.refresh_peers_button.clicked.connect(self.refresh_peers)
         self.refresh_peers_button.setToolTip("Search the network again for devices.")
 
-        self.send_button = QPushButton("Send File")
+        self.send_button = QPushButton("Send Files")
         self.send_button.setObjectName("PrimaryButton")
         self.send_button.clicked.connect(self.send_selected_file)
-        self.send_button.setToolTip("Encrypt and send the chosen file to the peer.")
+        self.send_button.setToolTip(
+            "Encrypt and send everything in the list — files and whole folders — "
+            "in one session."
+        )
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 100)
@@ -777,7 +1015,10 @@ class DashboardWindow(QMainWindow):
         parent_layout.addWidget(self.transfer_detail_label)
 
     def _build_receive_panel(self, parent_layout: QVBoxLayout) -> None:
-        hint = QLabel("Click Start Listening, then give the sender your address shown below.")
+        hint = QLabel(
+            "Click Start Listening, then give the sender your address shown below. "
+            "One session can deliver a batch of files and whole folders."
+        )
         hint.setObjectName("PanelHint")
         hint.setWordWrap(True)
         parent_layout.addWidget(hint)
@@ -860,7 +1101,9 @@ class DashboardWindow(QMainWindow):
         self.receive_button = QPushButton("Start Listening")
         self.receive_button.setObjectName("PrimaryButton")
         self.receive_button.clicked.connect(self.toggle_receiving)
-        self.receive_button.setToolTip("Start listening for one incoming file.")
+        self.receive_button.setToolTip(
+            "Start listening for one incoming transfer (a single file, a batch, or folders)."
+        )
 
         self.receive_status_label = QLabel("Idle")
         self.receive_status_label.setObjectName("ReceiveStatus")
@@ -882,7 +1125,6 @@ class DashboardWindow(QMainWindow):
         received_row.addWidget(open_folder_button)
         parent_layout.addLayout(received_row)
 
-        self._icon_provider = QFileIconProvider()
         self.received_list = QListWidget()
         self.received_list.setObjectName("ReceivedList")
         self.received_list.setIconSize(QSize(28, 28))
@@ -971,18 +1213,20 @@ class DashboardWindow(QMainWindow):
             f"Listening on :{config.port} ({config.mode.upper()})..."
         )
         self._start_pulse(self.receive_status_label)
-        self.status_changed.emit(f"Listening for a file on :{config.port}")
+        self.status_changed.emit(f"Listening for a transfer on :{config.port}")
 
         def _worker() -> None:
             try:
                 if wan:
-                    output_path, stats = udp_receive_file(config=config, cancel_event=cancel)
+                    paths, stats = udp_receive_paths(config=config, cancel_event=cancel)
                 else:
-                    output_path, stats = receive_file(config=config, cancel_event=cancel)
+                    paths, stats = receive_paths(config=config, cancel_event=cancel)
             except Exception as exc:
                 self.receive_failed.emit(str(exc))
                 return
-            self.receive_finished.emit(str(output_path), stats.bytes_transferred, stats.chunks)
+            self.receive_finished.emit(
+                [str(path) for path in paths], stats.bytes_transferred, stats.chunks
+            )
 
         self._receive_thread = threading.Thread(target=_worker, daemon=True)
         self._receive_thread.start()
@@ -1019,7 +1263,7 @@ class DashboardWindow(QMainWindow):
 
         def _worker() -> None:
             try:
-                output_path, stats = wan_receive_file(
+                paths, stats = wan_receive_file(
                     rendezvous_addr=rendezvous_addr,
                     token=token,
                     relay_addr=relay_addr,
@@ -1031,7 +1275,9 @@ class DashboardWindow(QMainWindow):
             except Exception as exc:
                 self.receive_failed.emit(str(exc))
                 return
-            self.receive_finished.emit(str(output_path), stats.bytes_transferred, stats.chunks)
+            self.receive_finished.emit(
+                [str(paths)], stats.bytes_transferred, stats.chunks
+            )
 
         self._receive_thread = threading.Thread(target=_worker, daemon=True)
         self._receive_thread.start()
@@ -1041,14 +1287,33 @@ class DashboardWindow(QMainWindow):
         self.receive_button.setText("Start Listening")
         self.receive_button.setEnabled(True)
 
-    def _on_receive_finished(self, path: str, bytes_received: int, chunks: int) -> None:
+    def _on_receive_finished(self, path: object, bytes_received: int, chunks: int) -> None:
         self._reset_receive_button()
-        name = Path(path).name
-        self.receive_status_label.setText(
-            f"Received {name} ({_human_bytes(bytes_received)}, {chunks} chunk(s))"
+        paths = (
+            [str(item) for item in path]
+            if isinstance(path, (list, tuple))
+            else ([str(path)] if path else [])
         )
-        self._add_received_file(path)
-        self.status_changed.emit(f"Received {name}")
+        for received_path in paths:
+            self._add_received_file(received_path)
+
+        if len(paths) == 1:
+            name = Path(paths[0]).name
+            self.receive_status_label.setText(
+                f"Received {name} ({_human_bytes(bytes_received)}, {chunks} chunk(s))"
+            )
+            self.status_changed.emit(f"Received {name}")
+        elif paths:
+            self.receive_status_label.setText(
+                f"Received {len(paths)} files ({_human_bytes(bytes_received)}, "
+                f"{chunks} chunk(s))"
+            )
+            self.status_changed.emit(f"Received {len(paths)} files")
+        else:
+            self.receive_status_label.setText(
+                f"Received an empty folder ({_human_bytes(bytes_received)})"
+            )
+            self.status_changed.emit("Received an empty folder")
         self.refresh_logs()
 
     def _on_receive_failed(self, message: str) -> None:
@@ -1066,6 +1331,17 @@ class DashboardWindow(QMainWindow):
         layout = QVBoxLayout(group)
         layout.setContentsMargins(10, 10, 10, 10)
 
+        toolbar = QHBoxLayout()
+        self.network_refresh_button = QPushButton("Refresh Peers")
+        self.network_refresh_button.clicked.connect(self.refresh_peers)
+        self.network_refresh_button.setToolTip("Search the network again for SecureLink devices.")
+        self.network_self_label = QLabel("This device: starting LAN announcement…")
+        self.network_self_label.setObjectName("PanelHint")
+        self.network_self_label.setWordWrap(True)
+        toolbar.addWidget(self.network_refresh_button)
+        toolbar.addWidget(self.network_self_label, 1)
+        layout.addLayout(toolbar)
+
         self.network_table = QTableWidget(0, 6)
         self.network_table.setHorizontalHeaderLabels(
             ["Name", "Address", "Port", "VLAN", "Trusted", "Source"]
@@ -1076,10 +1352,12 @@ class DashboardWindow(QMainWindow):
         self.network_table.verticalHeader().setVisible(False)
         self.network_table.horizontalHeader().setStretchLastSection(True)
         self.network_table.itemSelectionChanged.connect(self._apply_selected_network_row)
-        self.network_table.setToolTip("Click a device to fill in its address in the Send panel above.")
+        self.network_table.setToolTip("Click a device to fill in its address in the Send panel.")
 
         self.network_hint_label = QLabel(
-            "No devices found yet. Click Refresh Peers, or just type the address in the Send panel."
+            "No SecureLink devices found yet. Peers appear here only while SecureLink "
+            "is open on them and mDNS is allowed on your network — you can always "
+            "type an address in the Send panel instead."
         )
         self.network_hint_label.setObjectName("PanelHint")
         self.network_hint_label.setWordWrap(True)
@@ -1089,6 +1367,27 @@ class DashboardWindow(QMainWindow):
         self.tailscale_hint_label.setObjectName("TailscaleHint")
         self.tailscale_hint_label.setWordWrap(True)
         self.tailscale_hint_label.setVisible(False)
+
+        # NAT status — tells the user whether WAN hole punching will work on this
+        # network, which matters for internet (coordination-server) transfers.
+        nat_group = QGroupBox("Internet (WAN) path")
+        nat_layout = QVBoxLayout(nat_group)
+        nat_layout.setContentsMargins(4, 4, 4, 4)
+        nat_row = QHBoxLayout()
+        self.nat_check_button = QPushButton("Check NAT type")
+        self.nat_check_button.setToolTip(
+            "Probes STUN to classify this host's NAT. Cone/open NATs support direct "
+            "WAN hole punching; symmetric NATs need the relay (or a VPN)."
+        )
+        self.nat_check_button.clicked.connect(self.check_nat)
+        self.nat_status_label = QLabel("Not checked yet")
+        self.nat_status_label.setObjectName("PanelHint")
+        self.nat_status_label.setWordWrap(True)
+        nat_row.addWidget(self.nat_check_button)
+        nat_row.addStretch(1)
+        nat_row.addWidget(self.nat_status_label)
+        nat_layout.addLayout(nat_row)
+        layout.addWidget(nat_group)
 
         layout.addWidget(self.network_table)
         layout.addWidget(self.network_hint_label)
@@ -1259,18 +1558,154 @@ class DashboardWindow(QMainWindow):
         self.status_changed.emit("Settings saved")
 
     def choose_file(self) -> None:
-        file_path, _selected_filter = QFileDialog.getOpenFileName(
+        file_paths, _selected_filter = QFileDialog.getOpenFileNames(
             self,
-            "Select file to send",
+            "Select files to send",
             str(Path.cwd()),
             "All Files (*)",
         )
-        if file_path:
-            self.file_edit.setText(file_path)
+        if file_paths:
+            self.add_send_paths(file_paths)
+
+    def choose_folder(self) -> None:
+        directory = QFileDialog.getExistingDirectory(
+            self,
+            "Select a folder to send",
+            str(Path.cwd()),
+        )
+        if directory:
+            self.add_send_paths([directory])
+
+    def choose_single_file(self) -> None:
+        path, _selected_filter = QFileDialog.getOpenFileName(
+            self,
+            "Select a single file to send",
+            str(Path.cwd()),
+            "All Files (*)",
+        )
+        if path:
+            self.file_edit.setText(path)
+
+    def add_send_paths(self, paths: object) -> None:
+        """Queue files/folders for sending, ignoring duplicates and missing paths."""
+
+        if isinstance(paths, (str, Path)):
+            candidates = [str(paths)]
+        elif isinstance(paths, (list, tuple, set)):
+            candidates = [str(item) for item in paths]
+        else:
+            return
+
+        known = {os.path.normcase(path) for path in self._send_paths}
+        added = 0
+        missing: list[str] = []
+        for candidate in candidates:
+            text = candidate.strip()
+            if not text:
+                continue
+            source = Path(text).expanduser()
+            if not source.exists():
+                missing.append(text)
+                continue
+            resolved = str(source.resolve())
+            key = os.path.normcase(resolved)
+            if key in known:
+                continue
+            known.add(key)
+            self._send_paths.append(resolved)
+            added += 1
+
+        if added:
+            self._refresh_send_list()
+            self.status_changed.emit(
+                f"Added {added} item(s) to the send queue "
+                f"({len(self._send_paths)} total)"
+            )
+            tabs = getattr(self, "tabs", None)
+            if tabs is not None:
+                tabs.setCurrentIndex(0)
+        if missing:
+            QMessageBox.warning(
+                self,
+                "SecureLink",
+                "These paths could not be added:\n" + "\n".join(missing[:10]),
+            )
+
+    def remove_selected_send_paths(self) -> None:
+        selected = {
+            os.path.normcase(str(item.data(Qt.UserRole)))
+            for item in self.send_list.selectedItems()
+            if item.data(Qt.UserRole)
+        }
+        if not selected:
+            return
+        self._send_paths = [
+            path for path in self._send_paths if os.path.normcase(path) not in selected
+        ]
+        self._refresh_send_list()
+        self.status_changed.emit("Removed selected item(s) from the send queue")
+
+    def clear_send_paths(self) -> None:
+        if not self._send_paths:
+            return
+        self._send_paths.clear()
+        self._refresh_send_list()
+        self.status_changed.emit("Send queue cleared")
+
+    def _refresh_send_list(self) -> None:
+        if not hasattr(self, "send_list"):
+            return
+        self.send_list.clear()
+        if not self._send_paths:
+            hint = QListWidgetItem("Drag files or folders here to add them.")
+            hint.setFlags(Qt.NoItemFlags)
+            self.send_list.addItem(hint)
+            self._send_list_empty_hint = hint
+            return
+
+        self._send_list_empty_hint = None
+        for raw in self._send_paths:
+            path = Path(raw)
+            icon = self._icon_provider.icon(QFileInfo(raw))
+            if path.is_dir():
+                detail = "Folder"
+            else:
+                try:
+                    detail = _human_bytes(path.stat().st_size)
+                except OSError:
+                    detail = "Unreadable"
+            item = QListWidgetItem(icon, f"{path.name}    {detail}")
+            item.setData(Qt.UserRole, raw)
+            item.setToolTip(raw)
+            self.send_list.addItem(item)
+
+    def dragEnterEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+        if event.mimeData().hasUrls() and any(
+            url.isLocalFile() for url in event.mimeData().urls()
+        ):
+            event.acceptProposedAction()
+            return
+        super().dragEnterEvent(event)
+
+    def dropEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+        paths = [
+            url.toLocalFile()
+            for url in event.mimeData().urls()
+            if url.isLocalFile() and url.toLocalFile()
+        ]
+        if paths:
+            self.add_send_paths(paths)
+            event.acceptProposedAction()
+            return
+        super().dropEvent(event)
 
     def refresh_peers(self) -> None:
+        if self._peers_refreshing:
+            return
+        self._peers_refreshing = True
         self.status_changed.emit("Discovering peers...")
         assumed_port = self.peer_port_spin.value()
+        own_host = socket.gethostname().lower()
 
         def _worker() -> None:
             peer_records: list[dict[str, Any]] = []
@@ -1278,17 +1713,26 @@ class DashboardWindow(QMainWindow):
                 peer_records = [dict(vars(peer)) for peer in discover_peers()]
             except Exception as exc:
                 self.status_changed.emit(f"Peer discovery unavailable: {exc}")
+            # Never list this machine as its own peer.
+            peer_records = [
+                record
+                for record in peer_records
+                if str((record.get("metadata") or {}).get("host") or "").lower()
+                != own_host
+            ]
             # Tailscale (best-effort): one status read shared by peers + login check.
             ts_status = None
             try:
                 from core.discovery import tailscale_status
 
                 ts_status = tailscale_status()
-                seen = {record.get("address") for record in peer_records}
+                seen = {
+                    (record.get("address"), record.get("port")) for record in peer_records
+                }
                 for peer in tailscale_peers(port=assumed_port, status=ts_status):
-                    if peer.address not in seen:
+                    if (peer.address, peer.port) not in seen:
                         peer_records.append(dict(vars(peer)))
-                        seen.add(peer.address)
+                        seen.add((peer.address, peer.port))
             except Exception:
                 pass
             self.peers_loaded.emit(peer_records)
@@ -1304,8 +1748,64 @@ class DashboardWindow(QMainWindow):
                 )
             except Exception:
                 pass
+            advertiser = self._advertiser
+            if advertiser is not None:
+                advertiser.update_interfaces()
+            self._peers_refreshing = False
 
         threading.Thread(target=_worker, daemon=True).start()
+
+    def check_nat(self) -> None:
+        """Classify this host's NAT in a background thread and show the result.
+
+        Helps WAN users know whether direct hole punching will work or whether
+        they need the relay / a VPN. Runs off the GUI thread because STUN
+        probes hit the network.
+        """
+
+        if self._nat_refreshing:
+            return
+        self._nat_refreshing = True
+        self.nat_check_button.setEnabled(False)
+        self.nat_status_label.setText("Checking NAT via STUN…")
+
+        def _worker() -> None:
+            try:
+                result = detect_nat_mapping()
+                payload = {
+                    "mapping": result.mapping,
+                    "hole_punch_likely": bool(result.hole_punch_likely),
+                    "advice": result.advice,
+                    "reflexive": (
+                        f"{result.reflexive.ip}:{result.reflexive.port}"
+                        if result.reflexive is not None
+                        else None
+                    ),
+                }
+            except Exception as exc:  # noqa: BLE001
+                payload = {"error": str(exc)}
+            self.nat_state_loaded.emit(payload)
+            self._nat_refreshing = False
+            self.nat_check_button.setEnabled(True)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _render_nat_state(self, payload: object) -> None:
+        if not isinstance(payload, dict):
+            return
+        if "error" in payload:
+            self.nat_status_label.setText(f"NAT check unavailable: {payload['error']}")
+            self.status_changed.emit("NAT check failed")
+            return
+        mapping = payload.get("mapping", "unknown")
+        reflexive = payload.get("reflexive")
+        likely = bool(payload.get("hole_punch_likely"))
+        parts = [f"NAT: {mapping}"]
+        if reflexive:
+            parts.append(f"public {reflexive}")
+        parts.append("hole punching likely" if likely else "hole punching unlikely")
+        self.nat_status_label.setText(" · ".join(parts))
+        self.status_changed.emit(f"NAT check: {mapping}")
 
     def _render_tailscale_state(self, payload: object) -> None:
         summary = str(payload.get("summary") or "") if isinstance(payload, dict) else ""
@@ -1314,35 +1814,78 @@ class DashboardWindow(QMainWindow):
 
     def _render_local_addresses(self, payload: object) -> None:
         addresses = payload if isinstance(payload, list) else []
-        if not addresses:
+        self._local_addresses = [
+            entry for entry in addresses if isinstance(entry, dict) and entry.get("address")
+        ]
+        self._update_self_label()
+        if not self._local_addresses:
             self.local_addr_label.setText("No reachable address detected")
             return
         labels = {"vpn": "VPN", "lan": "LAN", "public": "public"}
         parts = [
             f"{addr.get('address')} ({labels.get(addr.get('kind'), addr.get('kind'))})"
-            for addr in addresses
-            if addr.get("address")
+            for addr in self._local_addresses
         ]
         self.local_addr_label.setText("    ".join(parts))
 
+    def _on_advertised(self, name: str, port: int) -> None:
+        self._advertised_as = (name, port)
+        self._update_self_label()
+        self.statusBar().showMessage(
+            f"Visible to other SecureLink apps as {name} on port {port}"
+        )
+
+    def _update_self_label(self) -> None:
+        host = socket.gethostname() or "this device"
+        advertised = getattr(self, "_advertised_as", None)
+        if advertised:
+            text = f"This device: {host} · visible to other SecureLink apps on port {advertised[1]}"
+        else:
+            text = f"This device: {host} · LAN announcement starting…"
+        lan_addresses = [
+            str(address.get("address"))
+            for address in getattr(self, "_local_addresses", [])
+            if address.get("kind") in {"lan", "vpn"}
+        ]
+        if lan_addresses:
+            text += " · " + ", ".join(lan_addresses[:4])
+        self.network_self_label.setText(text)
+
     def _render_peers(self, peers: object) -> None:
         self._peers = list(peers) if isinstance(peers, list) else []
+
+        current_host = self.peer_host_edit.text().strip()
+        current_port = self.peer_port_spin.value()
 
         self.peer_selector.blockSignals(True)
         self.peer_selector.clear()
         for peer in self._peers:
             self.peer_selector.addItem(_format_peer_display(peer), peer)
+        if self._peers:
+            matching = next(
+                (
+                    index
+                    for index, peer in enumerate(self._peers)
+                    if str(peer.get("address") or "") == current_host
+                ),
+                -1,
+            )
+            self.peer_selector.setCurrentIndex(matching if matching >= 0 else 0)
         self.peer_selector.blockSignals(False)
 
-        if self._peers:
-            self.peer_selector.setCurrentIndex(0)
+        # Auto-fill only when the user hasn't typed an address; a background
+        # refresh must never clobber manual input.
+        if self._peers and not current_host:
             self._apply_selected_peer(0)
-        else:
-            self.peer_host_edit.clear()
-            self.peer_port_spin.setValue(55000)
+        elif not self._peers:
+            if not current_host:
+                self.peer_host_edit.clear()
+            self.peer_port_spin.setValue(current_port)
 
         self._render_network_table(self._peers)
-        self.statusBar().showMessage(f"Discovered {len(self._peers)} peer(s)")
+        self.statusBar().showMessage(
+            f"Discovered {len(self._peers)} SecureLink peer(s)"
+        )
 
     def _render_network_table(self, peers: list[dict[str, Any]]) -> None:
         self.network_hint_label.setVisible(len(peers) == 0)
@@ -1354,7 +1897,7 @@ class DashboardWindow(QMainWindow):
                 str(peer.get("port") or ""),
                 "" if peer.get("vlan_id") is None else str(peer.get("vlan_id")),
                 "Yes" if peer.get("trusted") else "No",
-                str(peer.get("source") or "mdns"),
+                _source_label(str(peer.get("source") or "mdns")),
             ]
             for column, value in enumerate(values):
                 item = _table_item(value)
@@ -1475,19 +2018,27 @@ class DashboardWindow(QMainWindow):
         QMessageBox.warning(self, "SecureLink", message)
 
     def send_selected_file(self) -> None:
-        file_path = self.file_edit.text().strip()
-        if not file_path:
-            self._reject_send("Choose a file before sending.")
+        """Send everything in the queue (files and folders) in one session."""
+
+        paths = list(self._send_paths)
+        single = self.file_edit.text().strip()
+        if single and single not in paths:
+            paths.insert(0, single)
+        if not paths:
+            self._reject_send("Add files or folders before sending.")
             return
-        if not Path(file_path).is_file():
-            self._reject_send(f"File not found: {file_path}")
+        missing = [path for path in paths if not Path(path).exists()]
+        if missing:
+            self._reject_send(
+                "These paths no longer exist:\n" + "\n".join(missing[:10])
+            )
             return
 
         # Internet transfer via a coordination server takes precedence when a
         # token is given (the peer address is then irrelevant).
         token = self.send_token_edit.text().strip()
         if token:
-            self._send_over_internet(file_path, token)
+            self._send_over_internet(paths, token)
             return
 
         peer_host = self.peer_host_edit.text().strip()
@@ -1516,7 +2067,9 @@ class DashboardWindow(QMainWindow):
         self.progress_bar.setValue(0)
         self.transfer_detail_label.setText("Sending...")
         self._start_pulse(self.transfer_detail_label)
-        self.status_changed.emit(f"Sending {Path(file_path).name} in {mode.upper()} mode...")
+        self.status_changed.emit(
+            f"Sending {len(paths)} queued item(s) in {mode.upper()} mode..."
+        )
         self._transfer_start = time.monotonic()
 
         on_progress = self._make_progress_emitter()
@@ -1524,15 +2077,28 @@ class DashboardWindow(QMainWindow):
         def _worker() -> None:
             try:
                 if mode == "wan":
-                    stats = udp_send_file(
-                        file_path, peer_host, config.port, config=config, progress=on_progress
+                    stats = udp_send_paths(
+                        paths,
+                        peer_host,
+                        config.port,
+                        config=config,
+                        progress=on_progress,
+                        item_started=self.transfer_item.emit,
                     )
                 else:
-                    stats = send_file(file_path, peer_host, config=config, progress=on_progress)
+                    stats = send_paths(
+                        paths,
+                        peer_host,
+                        config=config,
+                        progress=on_progress,
+                        item_started=self.transfer_item.emit,
+                    )
             except Exception as exc:
                 self.transfer_failed.emit(str(exc))
                 return
-            self.transfer_finished.emit(file_path, stats.bytes_transferred, stats.chunks)
+            self.transfer_finished.emit(
+                self._transfer_summary(paths), stats.bytes_transferred, stats.chunks
+            )
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -1564,7 +2130,12 @@ class DashboardWindow(QMainWindow):
 
         return on_progress
 
-    def _send_over_internet(self, file_path: str, token: str) -> None:
+    def _transfer_summary(self, paths: list[str]) -> str:
+        if len(paths) == 1:
+            return paths[0]
+        return f"{len(paths)} items"
+
+    def _send_over_internet(self, paths: list[str], token: str) -> None:
         resolved = self._coordination_settings()
         if resolved is None:
             self._reject_send(
@@ -1582,28 +2153,41 @@ class DashboardWindow(QMainWindow):
         self.progress_bar.setValue(0)
         self.transfer_detail_label.setText("Connecting via coordination server...")
         self._start_pulse(self.transfer_detail_label)
-        self.status_changed.emit(f"Sending {Path(file_path).name} over the internet...")
+        self.status_changed.emit(
+            f"Sending {len(paths)} item(s) over the internet..."
+        )
         self._transfer_start = time.monotonic()
         on_progress = self._make_progress_emitter()
 
         def _worker() -> None:
             try:
                 stats = wan_send_file(
-                    file_path,
+                    paths,
                     rendezvous_addr=rendezvous_addr,
                     token=token,
                     relay_addr=relay_addr,
                     config=config,
                     progress=on_progress,
+                    item_started=self.transfer_item.emit,
                     base_dir=self._settings_base_dir,
                     **stun_kwargs,
                 )
             except Exception as exc:
                 self.transfer_failed.emit(str(exc))
                 return
-            self.transfer_finished.emit(file_path, stats.bytes_transferred, stats.chunks)
+            self.transfer_finished.emit(
+                self._transfer_summary(paths), stats.bytes_transferred, stats.chunks
+            )
 
         threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_transfer_item(self, relative_path: str, index: int, total_items: int) -> None:
+        self._active_item = relative_path
+        name = Path(relative_path).name or relative_path
+        self.transfer_detail_label.setText(
+            f"Sending {index}/{total_items}: {name}"
+        )
+        self.status_changed.emit(f"Sending {name} ({index}/{total_items})")
 
     def _on_transfer_progress(self, sent: int, total: int) -> None:
         percent = int(sent * 100 / total) if total else 0
@@ -1611,8 +2195,12 @@ class DashboardWindow(QMainWindow):
         self.progress_bar.setValue(percent)
         elapsed = time.monotonic() - getattr(self, "_transfer_start", time.monotonic())
         rate = sent / elapsed if elapsed > 0 else 0.0
+        prefix = ""
+        if self._active_item:
+            name = Path(self._active_item).name or self._active_item
+            prefix = f"{name}  ·  "
         self.transfer_detail_label.setText(
-            f"{_human_bytes(sent)} / {_human_bytes(total)}  ·  {_human_bytes(rate)}/s"
+            f"{prefix}{_human_bytes(sent)} / {_human_bytes(total)}  ·  {_human_bytes(rate)}/s"
         )
 
     def _resolve_transport_mode(self, peer_host: str, vlan_id: int | None) -> str:
@@ -1621,14 +2209,16 @@ class DashboardWindow(QMainWindow):
             return choice
         return auto_select_transport_mode(vlan_id=vlan_id, peer_address=peer_host)
 
-    def _on_transfer_finished(self, file_path: str, bytes_sent: int, chunks: int) -> None:
+    def _on_transfer_finished(self, summary: str, bytes_sent: int, chunks: int) -> None:
         self._stop_pulse(self.transfer_detail_label)
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(100)
         self.transfer_detail_label.setText(
             f"Sent {_human_bytes(bytes_sent)} across {chunks} chunk(s)"
         )
-        self.status_changed.emit(f"Sent {Path(file_path).name} successfully")
+        label = Path(summary).name if Path(summary).exists() else summary
+        self._active_item = None
+        self.status_changed.emit(f"Sent {label} successfully")
         self.refresh_logs()
 
     def _on_transfer_failed(self, message: str) -> None:
@@ -1656,10 +2246,19 @@ class DashboardWindow(QMainWindow):
             header.setSectionResizeMode(column_count - 1, QHeaderView.ResizeToContents)
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
-        if hasattr(self, "_log_timer"):
-            self._log_timer.stop()
+        for timer_name in ("_log_timer", "_peer_timer", "_advertise_timer"):
+            timer = getattr(self, timer_name, None)
+            if timer is not None:
+                timer.stop()
         if self._receive_cancel is not None:
             self._receive_cancel.set()
+
+        advertiser = self._advertiser
+        self._advertiser = None
+        if advertiser is not None:
+            # Withdraw the mDNS record so peers drop this machine from their
+            # lists immediately instead of waiting for the TTL.
+            threading.Thread(target=advertiser.stop, daemon=True).start()
         super().closeEvent(event)
 
 

@@ -44,8 +44,9 @@ from .transport import (
     TransportError,
     _resolve_host_address,
     _validate_allowlist,
-    stream_receive,
-    stream_send,
+    collect_transfer_items,
+    stream_receive_items,
+    stream_send_items,
 )
 
 _TYPE_DATA = 0
@@ -352,6 +353,41 @@ class ReliableUdpChannel:
             self._handle_datagram(data)
 
 
+def udp_send_paths(
+    paths: str | Path | list[str | Path] | tuple[str | Path, ...],
+    peer_host: str,
+    peer_port: int,
+    *,
+    config: TransportConfig | None = None,
+    trust_prompt: Callable[[str], bool] | None = None,
+    base_dir: Path | None = None,
+    chunk_size: int | None = None,
+    progress: Callable[[int, int], None] | None = None,
+    item_started: Callable[[str, int, int], None] | None = None,
+) -> TransferStats:
+    """Send files/folders to ``peer_host:peer_port`` over reliable UDP (WAN)."""
+
+    items = collect_transfer_items(paths)
+    transfer_config = config or TransportConfig(mode="wan", port=peer_port)
+    peer_addr = (_resolve_host_address(peer_host), peer_port)
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        channel = ReliableUdpChannel(sock, peer_addr)
+        return stream_send_items(
+            channel,
+            items,
+            transfer_config,
+            trust_prompt=trust_prompt,
+            base_dir=base_dir,
+            progress=progress,
+            item_started=item_started,
+            chunk_size=chunk_size if chunk_size is not None else wan_chunk_size(),
+        )
+    finally:
+        sock.close()
+
+
 def udp_send_file(
     file_path: str | Path,
     peer_host: str,
@@ -363,25 +399,65 @@ def udp_send_file(
     chunk_size: int | None = None,
     progress: Callable[[int, int], None] | None = None,
 ) -> TransferStats:
-    """Send a file to ``peer_host:peer_port`` over reliable UDP (WAN mode)."""
+    """Send a single file over reliable UDP (WAN mode)."""
 
-    transfer_path = Path(file_path)
-    if not transfer_path.exists():
-        raise FileNotFoundError(transfer_path)
+    return udp_send_paths(
+        file_path,
+        peer_host,
+        peer_port,
+        config=config,
+        trust_prompt=trust_prompt,
+        base_dir=base_dir,
+        chunk_size=chunk_size,
+        progress=progress,
+    )
 
-    transfer_config = config or TransportConfig(mode="wan", port=peer_port)
-    peer_addr = (_resolve_host_address(peer_host), peer_port)
 
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+def wan_send_paths(
+    paths: str | Path | list[str | Path] | tuple[str | Path, ...],
+    *,
+    rendezvous_addr: tuple[str, int],
+    token: str,
+    relay_addr: tuple[str, int] | None = None,
+    stun_host: str | None = DEFAULT_STUN_HOST,
+    stun_port: int = DEFAULT_STUN_PORT,
+    config: TransportConfig | None = None,
+    trust_prompt: Callable[[str], bool] | None = None,
+    base_dir: Path | None = None,
+    chunk_size: int | None = None,
+    progress: Callable[[int, int], None] | None = None,
+    item_started: Callable[[str, int, int], None] | None = None,
+    timeout: float = 10.0,
+) -> TransferStats:
+    """Send files/folders over a coordination server (rendezvous + optional relay).
+
+    Both peers contact the same ``rendezvous_addr`` with a shared ``token``; the
+    server pairs them and they hole punch (falling back to ``relay_addr`` if
+    given). No coordination server is bundled — the caller supplies their own.
+    """
+    from .nat import wan_connect
+
+    items = collect_transfer_items(paths)
+    transfer_config = config or TransportConfig(mode="wan")
+
+    sock, peer_addr = wan_connect(
+        rendezvous_addr=rendezvous_addr,
+        token=token,
+        relay_addr=relay_addr,
+        stun_host=stun_host,
+        stun_port=stun_port,
+        timeout=timeout,
+    )
     try:
         channel = ReliableUdpChannel(sock, peer_addr)
-        return stream_send(
+        return stream_send_items(
             channel,
-            transfer_path,
+            items,
             transfer_config,
             trust_prompt=trust_prompt,
             base_dir=base_dir,
             progress=progress,
+            item_started=item_started,
             chunk_size=chunk_size if chunk_size is not None else wan_chunk_size(),
         )
     finally:
@@ -403,19 +479,41 @@ def wan_send_file(
     progress: Callable[[int, int], None] | None = None,
     timeout: float = 10.0,
 ) -> TransferStats:
-    """Send a file over a coordination server (rendezvous + optional relay).
+    """Send a single file over a coordination server (compatibility wrapper)."""
 
-    Both peers contact the same ``rendezvous_addr`` with a shared ``token``; the
-    server pairs them and they hole punch (falling back to ``relay_addr`` if
-    given). No coordination server is bundled — the caller supplies their own.
-    """
+    return wan_send_paths(
+        file_path,
+        rendezvous_addr=rendezvous_addr,
+        token=token,
+        relay_addr=relay_addr,
+        stun_host=stun_host,
+        stun_port=stun_port,
+        config=config,
+        trust_prompt=trust_prompt,
+        base_dir=base_dir,
+        chunk_size=chunk_size,
+        progress=progress,
+        timeout=timeout,
+    )
+
+
+def wan_receive_paths(
+    *,
+    rendezvous_addr: tuple[str, int],
+    token: str,
+    relay_addr: tuple[str, int] | None = None,
+    stun_host: str | None = DEFAULT_STUN_HOST,
+    stun_port: int = DEFAULT_STUN_PORT,
+    config: TransportConfig | None = None,
+    trust_prompt: Callable[[str], bool] | None = None,
+    base_dir: Path | None = None,
+    cancel_event: threading.Event | None = None,
+    timeout: float = 10.0,
+) -> tuple[list[Path], TransferStats]:
+    """Receive files/folders over a coordination server (rendezvous + optional relay)."""
     from .nat import wan_connect
 
-    transfer_path = Path(file_path)
-    if not transfer_path.exists():
-        raise FileNotFoundError(transfer_path)
     transfer_config = config or TransportConfig(mode="wan")
-
     sock, peer_addr = wan_connect(
         rendezvous_addr=rendezvous_addr,
         token=token,
@@ -425,16 +523,14 @@ def wan_send_file(
         timeout=timeout,
     )
     try:
-        channel = ReliableUdpChannel(sock, peer_addr)
-        return stream_send(
-            channel,
-            transfer_path,
-            transfer_config,
-            trust_prompt=trust_prompt,
-            base_dir=base_dir,
-            progress=progress,
-            chunk_size=chunk_size if chunk_size is not None else wan_chunk_size(),
+        channel = ReliableUdpChannel(
+            sock, peer_addr, allowlist=transfer_config.allowlist, cancel_event=cancel_event
         )
+        result = stream_receive_items(
+            channel, transfer_config, trust_prompt=trust_prompt, base_dir=base_dir
+        )
+        channel.linger()
+        return result
     finally:
         sock.close()
 
@@ -452,39 +548,32 @@ def wan_receive_file(
     cancel_event: threading.Event | None = None,
     timeout: float = 10.0,
 ) -> tuple[Path, TransferStats]:
-    """Receive a file over a coordination server (rendezvous + optional relay)."""
-    from .nat import wan_connect
+    """Receive a single file over a coordination server (compatibility wrapper)."""
 
     transfer_config = config or TransportConfig(mode="wan")
-    sock, peer_addr = wan_connect(
+    paths, stats = wan_receive_paths(
         rendezvous_addr=rendezvous_addr,
         token=token,
         relay_addr=relay_addr,
         stun_host=stun_host,
         stun_port=stun_port,
+        config=transfer_config,
+        trust_prompt=trust_prompt,
+        base_dir=base_dir,
+        cancel_event=cancel_event,
         timeout=timeout,
     )
-    try:
-        channel = ReliableUdpChannel(
-            sock, peer_addr, allowlist=transfer_config.allowlist, cancel_event=cancel_event
-        )
-        result = stream_receive(
-            channel, transfer_config, trust_prompt=trust_prompt, base_dir=base_dir
-        )
-        channel.linger()
-        return result
-    finally:
-        sock.close()
+    return (paths[0] if paths else transfer_config.output_dir), stats
 
 
-def udp_receive_file(
+def udp_receive_paths(
     *,
     config: TransportConfig | None = None,
     trust_prompt: Callable[[str], bool] | None = None,
     base_dir: Path | None = None,
     cancel_event: threading.Event | None = None,
-) -> tuple[Path, TransferStats]:
-    """Receive a file over reliable UDP (WAN mode).
+) -> tuple[list[Path], TransferStats]:
+    """Receive files/folders over reliable UDP (WAN mode).
 
     Binds a UDP socket and learns the peer's address from its first datagram;
     the allowlist (if any) is enforced the moment that address is learned.
@@ -499,7 +588,7 @@ def udp_receive_file(
         channel = ReliableUdpChannel(
             sock, None, allowlist=transfer_config.allowlist, cancel_event=cancel_event
         )
-        result = stream_receive(
+        result = stream_receive_items(
             channel,
             transfer_config,
             trust_prompt=trust_prompt,
@@ -510,3 +599,22 @@ def udp_receive_file(
         return result
     finally:
         sock.close()
+
+
+def udp_receive_file(
+    *,
+    config: TransportConfig | None = None,
+    trust_prompt: Callable[[str], bool] | None = None,
+    base_dir: Path | None = None,
+    cancel_event: threading.Event | None = None,
+) -> tuple[Path, TransferStats]:
+    """Receive a single file over reliable UDP (compatibility wrapper)."""
+
+    transfer_config = config or TransportConfig(mode="wan")
+    paths, stats = udp_receive_paths(
+        config=transfer_config,
+        trust_prompt=trust_prompt,
+        base_dir=base_dir,
+        cancel_event=cancel_event,
+    )
+    return (paths[0] if paths else transfer_config.output_dir), stats

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import os
 import shutil
 import socket
 import subprocess
@@ -55,35 +56,242 @@ class TailscaleState:
         return ""  # running and logged in — nothing to nag about
 
 
+SECURELINK_SERVICE_TYPE = "_securelink._tcp.local."
+APP_NAME = "SecureLink"
+
+
+def _service_instance_label(value: str) -> str:
+    """Make a hostname safe as an mDNS instance label (dots split labels)."""
+
+    cleaned = " ".join(str(value).replace(".", "-").split())
+    return cleaned or APP_NAME
+
+
+def _advertised_addresses() -> list[bytes]:
+    """Packed IPv4 addresses to publish, best (route-selected) first.
+
+    mDNS must tell peers which address to dial. ``local_reachable_addresses``
+    gives the address the OS would actually use for outbound traffic, so it goes
+    first; ``ifaddr`` (already a zeroconf dependency) adds any other NICs so
+    multi-homed machines are reachable on each network.
+    """
+
+    addresses: list[bytes] = []
+    seen: set[bytes] = set()
+
+    def push(raw: str) -> None:
+        try:
+            packed = socket.inet_aton(raw)
+        except OSError:
+            return
+        if packed not in seen:
+            seen.add(packed)
+            addresses.append(packed)
+
+    for item in local_reachable_addresses(include_loopback=False, probe_tailscale=False):
+        push(item.address)
+
+    try:
+        import ifaddr  # transitively required by zeroconf
+
+        for adapter in ifaddr.get_adapters():
+            for ip in adapter.ips:
+                if isinstance(ip.ip, str) and ":" not in ip.ip:
+                    push(ip.ip)
+    except Exception:
+        pass
+
+    if not addresses:
+        try:
+            push(socket.gethostbyname(socket.gethostname()))
+        except OSError:
+            pass
+    return addresses
+
+
+def _preferred_address(addresses: list[str]) -> str:
+    """Pick the address most likely to be reachable by a LAN peer."""
+
+    def rank(address: str) -> int:
+        try:
+            kind = classify_address(address)
+        except ValueError:
+            return 9
+        return {"lan": 0, "vpn": 1, "public": 2}.get(kind, 8)
+
+    ipv4 = [address for address in addresses if ":" not in address]
+    return min(ipv4 or addresses, key=rank) if addresses else ""
+
+
+class PeerAdvertiser:
+    """Advertise this host as a SecureLink peer over mDNS while the app runs.
+
+    Being registered is what makes one SecureLink installation appear in another
+    installation's peer list: discovery is service-based, so the other machine
+    must also be running SecureLink. Start/stop are safe to call from a worker
+    thread and repeated calls are idempotent.
+    """
+
+    def __init__(
+        self,
+        *,
+        port: int,
+        name: str | None = None,
+        service_type: str = SECURELINK_SERVICE_TYPE,
+        properties: dict[str, str] | None = None,
+    ) -> None:
+        self.port = int(port)
+        self.name = name or socket.gethostname() or APP_NAME
+        self.service_type = service_type
+        self.properties = dict(properties or {})
+        self._zeroconf: Any = None
+        self._info: Any = None
+        self._instance_name: str | None = None
+        self._lock = threading.Lock()
+
+    @property
+    def running(self) -> bool:
+        return self._zeroconf is not None
+
+    @property
+    def instance_name(self) -> str | None:
+        return self._instance_name
+
+    @property
+    def zeroconf(self) -> Any:
+        return self._zeroconf
+
+    @property
+    def info(self) -> Any:
+        return self._info
+
+    def _build_info(self, service_info_type: Any, instance: str) -> Any:
+        properties = {
+            "app": APP_NAME,
+            "name": self.name,
+            "host": socket.gethostname(),
+            "version": "2",
+            **self.properties,
+        }
+        return service_info_type(
+            self.service_type,
+            f"{instance}.{self.service_type}",
+            addresses=_advertised_addresses(),
+            port=self.port,
+            properties={key: str(value) for key, value in properties.items()},
+        )
+
+    def start(self) -> None:
+        from zeroconf import ServiceInfo, Zeroconf
+
+        with self._lock:
+            if self._zeroconf is not None:
+                return
+            zc = Zeroconf()
+            instance = _service_instance_label(self.name)
+            info = self._build_info(ServiceInfo, instance)
+            try:
+                zc.register_service(info)
+            except Exception:
+                # Usually a duplicate instance name (another SecureLink on this
+                # host). Retry once with a suffix; a real failure re-raises.
+                instance = f"{instance}-{os.urandom(2).hex()}"
+                info = self._build_info(ServiceInfo, instance)
+                try:
+                    zc.register_service(info)
+                except Exception:
+                    zc.close()
+                    raise
+            self._zeroconf = zc
+            self._info = info
+            self._instance_name = instance
+
+    def update_port(self, port: int) -> None:
+        """Re-register with a new receive port (no-op when unchanged)."""
+
+        new_port = int(port)
+        if new_port == self.port:
+            return
+        was_running = self.running
+        self.stop()
+        self.port = new_port
+        if was_running:
+            self.start()
+
+    def update_interfaces(self) -> None:
+        """Ask zeroconf to rescan NICs (call after a network change)."""
+
+        zc = self._zeroconf
+        if zc is None:
+            return
+        try:
+            zc.update_interfaces()
+        except Exception:
+            pass
+
+    def stop(self) -> None:
+        with self._lock:
+            zc, info = self._zeroconf, self._info
+            self._zeroconf = None
+            self._info = None
+            self._instance_name = None
+            if zc is None:
+                return
+            if info is not None:
+                try:
+                    zc.unregister_service(info)
+                except Exception:
+                    pass
+            try:
+                zc.close()
+            except Exception:
+                pass
+
+
 def announce_peer(
     *,
     name: str,
     port: int,
     vlan_id: int | None = None,
-    service_type: str = "_securelink._tcp.local.",
+    service_type: str = SECURELINK_SERVICE_TYPE,
     properties: dict[str, str] | None = None,
 ) -> tuple[Any, Any]:
-    try:
-        from zeroconf import ServiceInfo, Zeroconf
-    except ImportError as exc:
-        raise RuntimeError("zeroconf is required for LAN discovery") from exc
+    """Register a SecureLink service and return ``(zeroconf, service_info)``.
 
-    zc = Zeroconf()
-    info = ServiceInfo(
-        service_type,
-        f"{name}.{service_type}",
-        addresses=[socket.inet_aton(socket.gethostbyname(socket.gethostname()))],
+    Kept for callers that want to manage the registration themselves; the
+    dashboard uses :class:`PeerAdvertiser` for its start/stop lifecycle.
+    """
+
+    advertiser = PeerAdvertiser(
         port=port,
+        name=name,
+        service_type=service_type,
         properties={
             **(properties or {}),
             **({"vlan_id": str(vlan_id)} if vlan_id is not None else {}),
         },
     )
-    zc.register_service(info)
-    return zc, info
+    advertiser.start()
+    return advertiser.zeroconf, advertiser.info
 
 
-def discover_peers(timeout: float = 2.5, service_type: str = "_securelink._tcp.local.") -> list[PeerAdvertisement]:
+def _decode_properties(info: Any) -> dict[str, str]:
+    properties: dict[str, str] = {}
+    for key, value in (info.properties or {}).items():
+        try:
+            decoded_key = key.decode("utf-8") if isinstance(key, bytes) else str(key)
+            decoded_value = (
+                value.decode("utf-8")
+                if isinstance(value, bytes)
+                else ("" if value is None else str(value))
+            )
+        except UnicodeDecodeError:
+            continue
+        properties[decoded_key] = decoded_value
+    return properties
+
+
+def discover_peers(timeout: float = 2.5, service_type: str = SECURELINK_SERVICE_TYPE) -> list[PeerAdvertisement]:
     try:
         from zeroconf import ServiceBrowser, Zeroconf
     except ImportError as exc:
@@ -97,25 +305,33 @@ def discover_peers(timeout: float = 2.5, service_type: str = "_securelink._tcp.l
             info = zeroconf.get_service_info(service_type, name)
             if info is None:
                 return
-            address = ""
-            if info.addresses:
-                address = str(ipaddress.ip_address(info.addresses[0]))
+            addresses = [str(ipaddress.ip_address(raw)) for raw in info.addresses]
+            address = _preferred_address(addresses)
+            properties = _decode_properties(info)
+            display_name = (
+                properties.get("name")
+                or properties.get("host")
+                or info.server.rstrip(".").split(".")[0]
+                or name.split(".")[0]
+            )
             vlan_id = None
-            if info.properties.get(b"vlan_id"):
+            if properties.get("vlan_id"):
                 try:
-                    vlan_id = int(info.properties[b"vlan_id"].decode("utf-8"))
-                except Exception:
+                    vlan_id = int(properties["vlan_id"])
+                except ValueError:
                     vlan_id = None
             with peers_lock:
                 peers.append(
                     PeerAdvertisement(
-                        name=name,
+                        name=display_name,
                         address=address,
                         port=info.port,
                         vlan_id=vlan_id,
+                        source="mdns",
                         metadata={
-                            key.decode("utf-8"): value.decode("utf-8")
-                            for key, value in info.properties.items()
+                            **properties,
+                            "addresses": " ".join(addresses),
+                            "instance": name,
                         },
                     )
                 )
@@ -133,7 +349,12 @@ def discover_peers(timeout: float = 2.5, service_type: str = "_securelink._tcp.l
     finally:
         browser.cancel()
         zc.close()
-    return peers
+
+    deduped: dict[tuple[str, int], PeerAdvertisement] = {}
+    for peer in peers:
+        deduped.setdefault((peer.address, peer.port), peer)
+    return sorted(deduped.values(), key=lambda peer: (peer.name.lower(), peer.address))
+
 
 
 def classify_address(address: str) -> str:
