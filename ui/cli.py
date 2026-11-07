@@ -291,6 +291,17 @@ def _cmd_relay(args: argparse.Namespace) -> int:
     return _serve_forever(RelayServer(host=args.host, port=args.port), "relay")
 
 
+def _cmd_mcp(args: argparse.Namespace) -> int:
+    """Run the SecureLink MCP server over stdio (agent-facing tools)."""
+
+    import asyncio
+
+    from ui.mcp_server import mcp
+
+    asyncio.run(mcp.run_stdio_async())
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="securelink")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -388,6 +399,9 @@ def build_parser() -> argparse.ArgumentParser:
     relay_parser.add_argument("--host", default="0.0.0.0")
     relay_parser.add_argument("--port", type=int, default=0)
     relay_parser.set_defaults(func=_cmd_relay)
+
+    mcp_parser = subparsers.add_parser("mcp", help="run the SecureLink MCP server (agent tools)")
+    mcp_parser.set_defaults(func=_cmd_mcp)
 
     return parser
 

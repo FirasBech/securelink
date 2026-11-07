@@ -294,6 +294,26 @@ and listens for incoming
 transfers (LAN or WAN, with start/stop), alongside the discovered-peer map, live
 logs, and alerts.
 
+### Agent interface (MCP)
+
+SecureLink ships an **MCP server** so AI agents can drive transfers directly:
+
+```bash
+python -m ui.mcp
+```
+
+It exposes agent-callable tools backed by the same core the CLI uses:
+
+| Tool | What it does |
+| --- | --- |
+| `scan_peers` | Scan the local network for SecureLink peers (mDNS). |
+| `natcheck` | Classify this host's NAT and whether WAN hole punching should work. |
+| `send_file` | Send a file to a peer (`file_path`, `peer_host`, `peer_port`, optional `token` / `mode`). |
+| `status` | Show session counters (bytes sent/received, chunks, alerts). |
+
+The server speaks the Model Context Protocol over stdio and can also be pointed
+at a streamable-HTTP transport.
+
 ## VLAN Policy
 
 Edit `config/vlan_policy.json` to define inter-VLAN transfer rules.
