@@ -126,6 +126,45 @@ def send_file(
     return json.dumps({"sent": True, "bytes_transferred": stats.bytes_transferred, "chunks": stats.chunks})
 
 
+@mcp.tool(description="Send several files/folders to peers concurrently (one transport session per send).")
+def send_concurrent(
+    items: list[dict[str, Any]],
+    max_workers: int = 4,
+) -> str:
+    """Send multiple files/folders to peers concurrently.
+
+    ``items`` is a list of ``{"path": ..., "peer_host": ..., "peer_port": ...}``
+    dicts — one entry per transfer, each with its own destination. Transfers run
+    in parallel (capped by ``max_workers``) over independent transport sessions.
+    Returns one stats summary per item, in input order.
+    """
+
+    from core.concurrent import send_concurrent as send_many
+    from core.transport import TransportConfig
+
+    transfers: list[tuple[str, str, int]] = []
+    for item in items or []:
+        transfers.append(
+            (
+                item.get("path") or "",
+                item.get("peer_host") or "127.0.0.1",
+                int(item.get("peer_port") or 55000),
+            )
+        )
+
+    results = send_many(transfers, config=TransportConfig(), max_workers=max_workers)
+    summaries = [
+        {
+            "bytes_transferred": result.bytes_transferred,
+            "chunks": result.chunks,
+            "alerts": result.alerts,
+            "files": result.files,
+        }
+        for result in results
+    ]
+    return json.dumps({"sent": True, "results": summaries})
+
+
 @mcp.tool(description="Show SecureLink session counters (bytes sent/received, chunks, alerts).")
 def status() -> str:
     """Return the current session counters from ~/.securelink/session.json."""
