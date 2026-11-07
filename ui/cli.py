@@ -292,13 +292,23 @@ def _cmd_relay(args: argparse.Namespace) -> int:
 
 
 def _cmd_mcp(args: argparse.Namespace) -> int:
-    """Run the SecureLink MCP server over stdio (agent-facing tools)."""
+    """Run the SecureLink MCP server (stdio, or streamable HTTP for agents)."""
 
     import asyncio
 
     from ui.mcp_server import mcp
 
-    asyncio.run(mcp.run_stdio_async())
+    transport = getattr(args, "transport", "stdio")
+    if transport == "stdio":
+        asyncio.run(mcp.run_stdio_async())
+    else:
+        asyncio.run(
+            mcp.run_streamable_http_async(
+                host="127.0.0.1",
+                port=8000,
+                streamable_http_path="/mcp",
+            )
+        )
     return 0
 
 
@@ -410,6 +420,7 @@ def build_parser() -> argparse.ArgumentParser:
     relay_parser.set_defaults(func=_cmd_relay)
 
     mcp_parser = subparsers.add_parser("mcp", help="run the SecureLink MCP server (agent tools)")
+    mcp_parser.add_argument("--transport", default="stdio", choices=["stdio", "streamable-http"])
     mcp_parser.set_defaults(func=_cmd_mcp)
 
     history_parser = subparsers.add_parser("history", help="list recent transfer history", parents=[common])
