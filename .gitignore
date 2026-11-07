@@ -33,3 +33,7 @@ Thumbs.db
 # Kept locally but not published: deps live in the README, CLAUDE.md is dev notes
 requirements.txt
 CLAUDE.md
+
+# Tests are dev-only; kept locally but not published so fresh clones/downloads
+# don't include them. Run locally with: python -m pytest tests/
+tests/
