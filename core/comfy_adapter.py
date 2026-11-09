@@ -17,6 +17,10 @@ from core.agent_adapters import WorkloadStillRunning, workspace_path
 from core.worker import WorkerCancelled, WorkerContext
 
 
+class WorkflowRejected(ValueError):
+    """A verified ComfyUI validation response says no prompt was queued."""
+
+
 def _local_url(url: str) -> str:
     parsed = urllib.parse.urlsplit(url)
     if (parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}
@@ -31,8 +35,20 @@ def _json_request(url: str, data: dict[str, Any] | None = None) -> dict[str, Any
     req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"} if body else {})
     # Avoid configured HTTP proxies for the local-only backend.
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    with opener.open(req, timeout=10) as response:
-        raw = response.read(8 * 1024 * 1024 + 1)
+    try:
+        with opener.open(req, timeout=10) as response:
+            raw = response.read(8 * 1024 * 1024 + 1)
+    except urllib.error.HTTPError as exc:
+        if data is not None and 400 <= exc.code < 500:
+            try:
+                rejection = json.loads(exc.read(1024 * 1024 + 1))
+            except (ValueError, UnicodeDecodeError):
+                rejection = None
+            if (isinstance(rejection, dict) and not rejection.get("prompt_id") and
+                    (rejection.get("error") or rejection.get("node_errors"))):
+                raise WorkflowRejected("ComfyUI rejected the workflow: " +
+                                       str(rejection.get("error") or rejection.get("node_errors"))) from exc
+        raise
     if len(raw) > 8 * 1024 * 1024:
         raise ValueError("ComfyUI response is too large")
     value = json.loads(raw)
@@ -73,6 +89,8 @@ def comfy_adapter(workspace: Path, url: str, gpu_uuid: str, *, poll_interval: fl
         # an ambiguous submission or loss of contact with a running backend.
         try:
             response = _json_request(base + "/prompt", {"prompt": graph, "client_id": job["id"]})
+        except WorkflowRejected:
+            raise
         except Exception as exc:
             raise WorkloadStillRunning("ComfyUI submission outcome unknown; verify server before recovery") from exc
         prompt_id = response.get("prompt_id")

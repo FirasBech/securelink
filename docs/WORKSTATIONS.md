@@ -113,7 +113,9 @@ those GPUs. VRAM is not automatically pooled across cards.
 
 With the CLI, `python -m ui.cli jobs list` shows local jobs and `jobs events
 JOB_ID` shows their updates. The local MCP tools provide the same operations.
-A stable caller-supplied job ID makes repeat submission idempotent. Cancelling
+A stable caller-supplied job ID makes repeat submission idempotent. If an SSH
+response is lost, the controller reports the job ID; check `jobs.get` before
+retrying and reuse that ID. Cancelling
 a queued job is immediate; cancelling a running job asks its adapter to stop
 the process. Reservations remain held until the process has stopped. Process
 trees that cannot be confirmed stopped retain their reservation. Interrupted

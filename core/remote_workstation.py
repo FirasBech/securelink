@@ -12,6 +12,7 @@ import json
 import re
 import shutil
 import subprocess
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -51,7 +52,13 @@ def request(target: str, project_path: str, method: str, params: dict[str, Any] 
             f"os.chdir(base64.b64decode('{encoded}').decode('utf-8'));"
             "runpy.run_module('ui.remote_worker',run_name='__main__')")
     remote_command = f'python -c "{code}"'
-    body = json.dumps({"method": method, "params": params or {}}, allow_nan=False).encode("utf-8")
+    request_params = dict(params or {})
+    # An explicit ID lets callers reconcile an uncertain SSH response without
+    # submitting a second job. Never mutate the caller's dictionary.
+    if method == "jobs.submit" and not request_params.get("job_id"):
+        request_params["job_id"] = str(uuid.uuid4())
+    submitted_id = request_params.get("job_id") if method == "jobs.submit" else None
+    body = json.dumps({"method": method, "params": request_params}, allow_nan=False).encode("utf-8")
     if len(body) > 12 * 1024 * 1024:
         raise RemoteError("request is too large")
     options = [ssh, "-T", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
@@ -68,18 +75,33 @@ def request(target: str, project_path: str, method: str, params: dict[str, Any] 
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise RemoteError(f"SSH connection failed: {exc}") from exc
+        detail = f"SSH connection failed: {exc}"
+        if submitted_id:
+            detail += f"; submission outcome unknown for job {submitted_id}; check jobs.get before retrying"
+        raise RemoteError(detail) from exc
     if result.returncode:
-        raise RemoteError("SSH request failed: " + result.stderr.decode("utf-8", "replace")[-2000:])
+        detail = "SSH request failed: " + result.stderr.decode("utf-8", "replace")[-2000:]
+        if submitted_id:
+            detail += f"; submission outcome unknown for job {submitted_id}; check jobs.get before retrying"
+        raise RemoteError(detail)
     if len(result.stdout) > 12 * 1024 * 1024:
-        raise RemoteError("remote response is too large")
+        detail = "remote response is too large"
+        if submitted_id:
+            detail += f"; submission outcome unknown for job {submitted_id}; check jobs.get before retrying"
+        raise RemoteError(detail)
     try:
         response = json.loads(result.stdout)
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        raise RemoteError("remote workstation returned invalid JSON") from exc
+        detail = "remote workstation returned invalid JSON"
+        if submitted_id:
+            detail += f"; submission outcome unknown for job {submitted_id}; check jobs.get before retrying"
+        raise RemoteError(detail) from exc
     if not isinstance(response, dict) or response.get("ok") is not True:
         raise RemoteError(str(response.get("error", "remote request failed")) if isinstance(response, dict)
                           else "remote workstation returned invalid response")
     if not isinstance(response.get("result"), dict):
-        raise RemoteError("remote workstation returned invalid result")
+        detail = "remote workstation returned invalid result"
+        if submitted_id:
+            detail += f"; submission outcome unknown for job {submitted_id}; check jobs.get before retrying"
+        raise RemoteError(detail)
     return response["result"]

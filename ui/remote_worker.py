@@ -11,6 +11,7 @@ import json
 import os
 import socket
 import sys
+import tempfile
 import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
@@ -88,9 +89,26 @@ def dispatch(request: dict[str, Any]) -> dict[str, Any]:
         if len(data) > MAX_FILE_BYTES:
             raise ValueError("file exceeds the 8 MiB transfer limit")
         path.parent.mkdir(parents=True, exist_ok=True)
-        # Exclusive create: uploads never replace existing user files.
-        with path.open("xb") as handle:
-            handle.write(data)
+        # Stage beside the destination, then publish with an exclusive hard
+        # link. A failed upload cannot leave a partial destination or replace an
+        # existing file. Both names are on the same filesystem.
+        staged_path = None
+        try:
+            with tempfile.NamedTemporaryFile(prefix=".securelink-upload-", dir=path.parent,
+                                             delete=False) as handle:
+                staged_path = Path(handle.name)
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.link(staged_path, path)
+        finally:
+            if staged_path is not None:
+                try:
+                    staged_path.unlink(missing_ok=True)
+                except OSError:
+                    # Publishing may already have succeeded; a stale staging
+                    # file is safer than reporting a successful upload failed.
+                    pass
         return {"path": params["path"], "size": len(data)}
     raise ValueError("unknown method")
 
