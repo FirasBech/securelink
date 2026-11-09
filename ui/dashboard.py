@@ -276,11 +276,15 @@ class DashboardWindow(QMainWindow):
     receive_failed = pyqtSignal(str)
     advertised = pyqtSignal(str, int)
     nat_state_loaded = pyqtSignal(object)
+    workstation_loaded = pyqtSignal(object)
+    workstation_jobs_loaded = pyqtSignal(object)
+    remote_workstation_loaded = pyqtSignal(object)
 
     def __init__(self, auto_refresh: bool = True) -> None:
         super().__init__()
         self._auto_refresh = auto_refresh
         self._peers: list[dict[str, Any]] = []
+        self._workstation_jobs: list[dict[str, Any]] = []
         self._peers_refreshing = False
         self._nat_refreshing = False
         self._nat_state: dict[str, Any] | None = None
@@ -358,6 +362,7 @@ class DashboardWindow(QMainWindow):
         tabs.addTab(self._tab_with(self._build_transfer_panel), "  Send  ")
         tabs.addTab(self._tab_with(self._build_receive_panel), "  Receive  ")
         tabs.addTab(self._tab_with(self._build_network_panel), "  Network  ")
+        tabs.addTab(self._tab_with(self._build_workstation_panel), "  Workstation  ")
         tabs.addTab(self._tab_with(self._build_activity_panels), "  Activity  ")
         tabs.addTab(self._tab_with(self._build_settings_panel), "  Settings  ")
         self.tabs = tabs
@@ -837,6 +842,9 @@ class DashboardWindow(QMainWindow):
         threading.Thread(target=_worker, daemon=True).start()
 
     def _connect_signals(self) -> None:
+        self.workstation_loaded.connect(self._render_workstation)
+        self.workstation_jobs_loaded.connect(self._render_workstation_jobs)
+        self.remote_workstation_loaded.connect(self._render_remote_workstation)
         self.peers_loaded.connect(self._render_peers)
         self.local_addresses_loaded.connect(self._render_local_addresses)
         self.tailscale_state_loaded.connect(self._render_tailscale_state)
@@ -1325,6 +1333,252 @@ class DashboardWindow(QMainWindow):
         self.receive_status_label.setText("Receive failed")
         self.status_changed.emit("Receive failed")
         QMessageBox.critical(self, "SecureLink", message)
+
+    def _build_workstation_panel(self, parent_layout: QVBoxLayout) -> None:
+        group = QGroupBox("This workstation")
+        layout = QVBoxLayout(group)
+        hint = QLabel(
+            "Check this computer's GPUs and commands. This local check does not "
+            "start agents or enable remote control."
+        )
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        self.workstation_refresh_button = QPushButton("Check this computer")
+        self.workstation_refresh_button.clicked.connect(self.refresh_workstation)
+        layout.addWidget(self.workstation_refresh_button)
+        self.workstation_info = QLabel("Not checked yet.")
+        self.workstation_info.setWordWrap(True)
+        self.workstation_info.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.workstation_info.setTextFormat(Qt.PlainText)
+        layout.addWidget(self.workstation_info)
+        parent_layout.addWidget(group)
+
+        jobs_group = QGroupBox("Local workstation jobs")
+        jobs_layout = QVBoxLayout(jobs_group)
+        jobs_hint = QLabel("Jobs are stored locally. A runnable worker and remote connection are not available yet.")
+        jobs_hint.setWordWrap(True)
+        jobs_layout.addWidget(jobs_hint)
+        self.workstation_jobs_refresh = QPushButton("Refresh jobs")
+        self.workstation_jobs_refresh.clicked.connect(self.refresh_workstation_jobs)
+        jobs_layout.addWidget(self.workstation_jobs_refresh)
+        self.workstation_jobs_table = QTableWidget(0, 4)
+        self.workstation_jobs_table.setHorizontalHeaderLabels(["Job ID", "Kind", "Status", "GPUs"])
+        self.workstation_jobs_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.workstation_jobs_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.workstation_jobs_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.workstation_jobs_table.horizontalHeader().setStretchLastSection(True)
+        self.workstation_jobs_table.itemSelectionChanged.connect(self._show_workstation_job)
+        jobs_layout.addWidget(self.workstation_jobs_table)
+        self.workstation_job_details = QLabel("Select a job to see its updates.")
+        self.workstation_job_details.setWordWrap(True)
+        self.workstation_job_details.setTextFormat(Qt.PlainText)
+        self.workstation_job_details.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        jobs_layout.addWidget(self.workstation_job_details)
+        self.workstation_job_answer = QLineEdit()
+        self.workstation_job_answer.setPlaceholderText("Answer a pending question")
+        jobs_layout.addWidget(self.workstation_job_answer)
+        actions = QHBoxLayout()
+        self.workstation_answer_button = QPushButton("Send answer")
+        self.workstation_answer_button.clicked.connect(self._answer_workstation_job)
+        self.workstation_cancel_button = QPushButton("Cancel job")
+        self.workstation_cancel_button.clicked.connect(self._cancel_workstation_job)
+        actions.addWidget(self.workstation_answer_button)
+        actions.addWidget(self.workstation_cancel_button)
+        jobs_layout.addLayout(actions)
+        parent_layout.addWidget(jobs_group)
+
+        remote_group = QGroupBox("Remote workstation over SSH")
+        remote_layout = QVBoxLayout(remote_group)
+        remote_hint = QLabel("Use an SSH account and host key already configured on this computer. "
+                             "The remote worker must be configured and started separately.")
+        remote_hint.setWordWrap(True)
+        remote_layout.addWidget(remote_hint)
+        remote_grid = QGridLayout()
+        self.remote_target = QLineEdit()
+        self.remote_target.setPlaceholderText("user@computer")
+        self.remote_project = QLineEdit()
+        self.remote_project.setPlaceholderText("Remote SecureLink project folder")
+        self.remote_port = QSpinBox()
+        self.remote_port.setRange(1, 65535)
+        self.remote_port.setValue(22)
+        self.remote_agent = QComboBox()
+        self.remote_agent.addItems(["codex", "claude", "opencode", "blender", "comfyui"])
+        self.remote_gpu_count = QSpinBox()
+        self.remote_gpu_count.setRange(0, 1024)
+        self.remote_prompt = QLineEdit()
+        self.remote_prompt.setPlaceholderText("Agent task, workspace-relative .blend, or ComfyUI workflow .json")
+        self.remote_job_id = QLineEdit()
+        self.remote_job_id.setPlaceholderText("Job ID for status, updates, or cancellation")
+        self.remote_answer = QLineEdit()
+        self.remote_answer.setPlaceholderText("Answer to a pending question")
+        self.remote_question_id = QLineEdit()
+        self.remote_question_id.setPlaceholderText("Pending question ID")
+        for row, (label, field) in enumerate([
+            ("SSH target", self.remote_target), ("SecureLink folder", self.remote_project),
+            ("SSH port", self.remote_port), ("Agent", self.remote_agent),
+            ("Required GPUs", self.remote_gpu_count), ("Task", self.remote_prompt),
+            ("Job ID", self.remote_job_id), ("Question ID", self.remote_question_id),
+            ("Answer", self.remote_answer),
+        ]):
+            remote_grid.addWidget(QLabel(label), row, 0)
+            remote_grid.addWidget(field, row, 1)
+        remote_layout.addLayout(remote_grid)
+        remote_buttons = QHBoxLayout()
+        for title, method in [("Check", "status"), ("List jobs", "jobs.list"),
+                              ("Submit", "jobs.submit"), ("Job status", "jobs.get"),
+                              ("Updates", "jobs.events"), ("Answer", "jobs.answer"),
+                              ("Cancel", "jobs.cancel")]:
+            button = QPushButton(title)
+            button.clicked.connect(lambda _checked=False, chosen=method: self._remote_action(chosen))
+            remote_buttons.addWidget(button)
+        remote_layout.addLayout(remote_buttons)
+        self.remote_output = QTextBrowser()
+        self.remote_output.setMinimumHeight(150)
+        remote_layout.addWidget(self.remote_output)
+        parent_layout.addWidget(remote_group)
+
+    def refresh_workstation(self) -> None:
+        self.workstation_refresh_button.setEnabled(False)
+        self.workstation_info.setText("Checking this computer…")
+
+        def _worker() -> None:
+            try:
+                from core.workstation import local_inventory
+
+                self.workstation_loaded.emit(local_inventory())
+            except Exception as exc:
+                self.workstation_loaded.emit({"error": str(exc)})
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _render_workstation(self, data: object) -> None:
+        self.workstation_refresh_button.setEnabled(True)
+        if not isinstance(data, dict) or "error" in data:
+            self.workstation_info.setText("Workstation check failed.")
+            return
+        gpu = data["gpu"]
+        lines = [f"Computer: {data['name']}",
+                 f"System: {data['platform']['system']} {data['platform']['release']}",
+                 f"Logical processors: {data['logical_cpus'] or 'unknown'}", "", "NVIDIA GPUs:"]
+        for item in gpu["gpus"]:
+            lines.append(f"  GPU {item['index']}: {item['name']} — "
+                         f"{item['memory_free_mib']} MiB free / {item['memory_total_mib']} MiB total")
+        if not gpu["gpus"]:
+            lines.append(f"  {gpu['message']}")
+        lines.extend(["", "Commands found on PATH:"])
+        lines.extend(f"  {name}: {'found' if tool['detected_on_path'] else 'not found'}"
+                     for name, tool in data["tools"].items())
+        lines.extend(["", "A detected command may still need setup or sign-in.",
+                      "Remote workstation control is not enabled by this check."])
+        self.workstation_info.setText("\n".join(lines))
+
+    def _workstation_queue(self):
+        from core.job_queue import JobQueue
+        return JobQueue((self._settings_base_dir or Path.home()) / ".securelink" / "workstation-jobs.sqlite3")
+
+    def refresh_workstation_jobs(self) -> None:
+        self.workstation_jobs_refresh.setEnabled(False)
+
+        def _worker() -> None:
+            try:
+                queue = self._workstation_queue()
+                jobs = queue.list()
+                for job in jobs:
+                    job["events"] = queue.recent_events(job["id"], limit=25)
+                self.workstation_jobs_loaded.emit({"jobs": jobs})
+            except Exception as exc:
+                self.workstation_jobs_loaded.emit({"error": str(exc)})
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _render_workstation_jobs(self, data: object) -> None:
+        self.workstation_jobs_refresh.setEnabled(True)
+        if not isinstance(data, dict) or "error" in data:
+            self.workstation_job_details.setText("Could not load local jobs.")
+            return
+        self._workstation_jobs = data["jobs"]
+        self.workstation_jobs_table.setRowCount(len(self._workstation_jobs))
+        for index, job in enumerate(self._workstation_jobs):
+            for column, value in enumerate((job["id"], job["kind"], job["status"], job["gpu_count"])):
+                self.workstation_jobs_table.setItem(index, column, QTableWidgetItem(str(value)))
+        self.workstation_job_details.setText("Select a job to see its updates.")
+
+    def _selected_workstation_job(self) -> dict[str, Any] | None:
+        index = self.workstation_jobs_table.currentRow()
+        return self._workstation_jobs[index] if 0 <= index < len(self._workstation_jobs) else None
+
+    def _show_workstation_job(self) -> None:
+        job = self._selected_workstation_job()
+        if not job:
+            return
+        lines = [f"Status: {job['status']}", "Latest 25 updates (use CLI for more):"]
+        for event in job.get("events", []):
+            payload = event["payload"]
+            value = payload.get("message", payload.get("question", payload.get("answer", "")))
+            lines.append(f"{event['type'].capitalize()}: {value}")
+        self.workstation_job_details.setText("\n".join(lines))
+
+    def _answer_workstation_job(self) -> None:
+        job = self._selected_workstation_job()
+        if not job or not job.get("question_id"):
+            self.workstation_job_details.setText("Select a job with a pending question.")
+            return
+        try:
+            self._workstation_queue().answer_question(job["id"], job["question_id"], self.workstation_job_answer.text())
+        except Exception as exc:
+            self.workstation_job_details.setText(f"Could not send answer: {exc}")
+            return
+        self.workstation_job_answer.clear()
+        self.refresh_workstation_jobs()
+
+    def _cancel_workstation_job(self) -> None:
+        job = self._selected_workstation_job()
+        if not job:
+            self.workstation_job_details.setText("Select a job first.")
+            return
+        try:
+            self._workstation_queue().cancel(job["id"])
+        except Exception as exc:
+            self.workstation_job_details.setText(f"Could not cancel job: {exc}")
+            return
+        self.refresh_workstation_jobs()
+
+    def _remote_action(self, method: str) -> None:
+        from core.remote_workstation import request
+        target, project, port = self.remote_target.text().strip(), self.remote_project.text().strip(), self.remote_port.value()
+        params: dict[str, Any] = {}
+        if method in {"jobs.get", "jobs.events", "jobs.cancel", "jobs.answer"}:
+            params["job_id"] = self.remote_job_id.text().strip()
+        if method == "jobs.answer":
+            params.update({"question_id": self.remote_question_id.text().strip(), "answer": self.remote_answer.text()})
+        if method == "jobs.submit":
+            kind = self.remote_agent.currentText()
+            payload = ({"scene": self.remote_prompt.text()} if kind == "blender" else
+                       {"workflow": self.remote_prompt.text()} if kind == "comfyui" else
+                       {"prompt": self.remote_prompt.text()})
+            params = {"kind": kind, "payload": payload,
+                      "gpu_count": 1 if kind == "comfyui" else self.remote_gpu_count.value()}
+        self.remote_output.setPlainText("Connecting to workstation…")
+
+        def _worker() -> None:
+            try:
+                result = request(target, project, method, params, port=port)
+                self.remote_workstation_loaded.emit({"result": result})
+            except Exception as exc:
+                self.remote_workstation_loaded.emit({"error": str(exc)})
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _render_remote_workstation(self, data: object) -> None:
+        if not isinstance(data, dict):
+            self.remote_output.setPlainText("Invalid workstation response.")
+            return
+        self.remote_output.setPlainText(json.dumps(data, indent=2, ensure_ascii=False))
+        job = data.get("result", {}).get("job")
+        if isinstance(job, dict) and job.get("id"):
+            self.remote_job_id.setText(job["id"])
+            if job.get("question_id"):
+                self.remote_question_id.setText(job["question_id"])
 
     def _build_network_panel(self, parent_layout: QVBoxLayout) -> None:
         group = QGroupBox("Devices on Your Network")
@@ -2199,8 +2453,13 @@ class DashboardWindow(QMainWindow):
         if self._active_item:
             name = Path(self._active_item).name or self._active_item
             prefix = f"{name}  ·  "
+        remaining = max(0, total - sent)
+        eta = ""
+        if rate > 0 and total > 0 and remaining:
+            seconds = int(remaining / rate)
+            eta = f"  ·  ~{seconds // 60}m {seconds % 60}s left" if seconds >= 60 else f"  ·  ~{seconds}s left"
         self.transfer_detail_label.setText(
-            f"{prefix}{_human_bytes(sent)} / {_human_bytes(total)}  ·  {_human_bytes(rate)}/s"
+            f"{prefix}{_human_bytes(sent)} / {_human_bytes(total)}  ·  {_human_bytes(rate)}/s{eta}"
         )
 
     def _resolve_transport_mode(self, peer_host: str, vlan_id: int | None) -> str:

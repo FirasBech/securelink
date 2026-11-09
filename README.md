@@ -8,7 +8,7 @@ LAN and VLAN use direct TCP. WAN uses reliable UDP (selective-repeat windowed AR
 
 ## Getting started in 60 seconds
 
-1. **Install:** `pip install "cryptography>=42" "scapy>=2.5" "zeroconf>=0.132" "PyQt5>=5.15" "pytest>=8"`
+1. **Install:** `python -m pip install -r requirements-runtime.txt`
 2. **Launch:** double-click the **SecureLink Dashboard** shortcut, or run `python -m ui.dashboard`.
 3. **Receive (machine B):** in the Receive panel set a port and click **Start Listening** (tick **Allow unknown devices** on first contact).
 4. **Send (machine A):** choose a file, enter machine B's IP and port, click **Send File**.
@@ -299,8 +299,20 @@ logs, and alerts.
 SecureLink ships an **MCP server** so AI agents can drive transfers directly:
 
 ```bash
+python -m pip install "mcp>=2,<3"
 python -m ui.mcp
 ```
+
+For a read-only inventory of this computer's NVIDIA GPUs and detected commands,
+open **Workstation** in the desktop dashboard or run:
+
+```bash
+python -m ui.cli workstation
+```
+
+The `local_workstation_status` MCP tool returns the same information. A detected
+command may still need configuration. To connect a separate computer and run
+opt-in agent or Blender jobs, see the [workstation setup guide](docs/WORKSTATIONS.md).
 
 It exposes agent-callable tools backed by the same core the CLI uses:
 

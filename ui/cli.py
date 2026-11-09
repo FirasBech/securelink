@@ -321,6 +321,73 @@ def _cmd_history(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_workstation(args: argparse.Namespace) -> int:
+    from core.workstation import local_inventory
+
+    print(json.dumps(local_inventory(), indent=2, sort_keys=True))
+    return 0
+
+
+def _cmd_jobs(args: argparse.Namespace) -> int:
+    import sqlite3
+    from core.job_queue import JobError, JobQueue
+
+    try:
+        queue = JobQueue(_securelink_root(_base_dir(args)) / "workstation-jobs.sqlite3")
+        if args.jobs_action == "list":
+            result = queue.list(limit=args.limit)
+        elif args.jobs_action == "submit":
+            payload = json.loads(args.payload)
+            result = queue.submit(args.kind, payload, gpu_count=args.gpus,
+                                  min_free_mib=args.min_free_mib, job_id=args.job_id)
+        elif args.jobs_action == "events":
+            result = queue.events(args.job_id, after=args.after)
+        elif args.jobs_action == "answer":
+            result = queue.answer_question(args.job_id, args.question_id, args.answer)
+        elif args.jobs_action == "recover":
+            if not args.confirm_stopped:
+                raise JobError("confirm all related processes have stopped using --confirm-stopped")
+            result = queue.resolve_interrupted(args.job_id, args.reason)
+        else:
+            result = queue.cancel(args.job_id)
+    except (JobError, ValueError, OSError, sqlite3.Error) as exc:
+        import sys
+        print(f"Workstation job error: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
+def _cmd_remote(args: argparse.Namespace) -> int:
+    from core.remote_workstation import RemoteError, request
+    methods = {"status": "status", "list": "jobs.list", "get": "jobs.get", "submit": "jobs.submit", "render": "jobs.submit", "workflow": "jobs.submit",
+               "events": "jobs.events", "cancel": "jobs.cancel", "answer": "jobs.answer"}
+    params: dict[str, Any] = {}
+    if args.remote_action in {"get", "events", "cancel", "answer"}:
+        params["job_id"] = args.job_id
+    if args.remote_action == "events":
+        params["after"] = args.after
+    if args.remote_action == "answer":
+        params.update({"question_id": args.question_id, "answer": args.answer})
+    if args.remote_action == "submit":
+        params = {"kind": args.kind, "payload": {"prompt": args.prompt, "directory": args.directory},
+                  "gpu_count": args.gpus, "min_free_mib": args.min_free_mib, "job_id": args.job_id}
+    if args.remote_action == "render":
+        params = {"kind": "blender", "payload": {"scene": args.scene, "frame": args.frame},
+                  "gpu_count": args.gpus, "min_free_mib": args.min_free_mib, "job_id": args.job_id}
+    if args.remote_action == "workflow":
+        params = {"kind": "comfyui", "payload": {"workflow": args.workflow}, "gpu_count": 1,
+                  "min_free_mib": args.min_free_mib, "job_id": args.job_id}
+    try:
+        result = request(args.target, args.project, methods[args.remote_action], params, port=args.port)
+    except RemoteError as exc:
+        import sys
+        print(f"Remote workstation error: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
 def _cmd_web(args: argparse.Namespace) -> int:
     """Start the SecureLink web UI (browser-based file transfer)."""
 
@@ -435,6 +502,75 @@ def build_parser() -> argparse.ArgumentParser:
     history_parser = subparsers.add_parser("history", help="list recent transfer history", parents=[common])
     history_parser.add_argument("--limit", type=int, default=20)
     history_parser.set_defaults(func=_cmd_history)
+
+    workstation_parser = subparsers.add_parser(
+        "workstation", help="show this computer's local workstation capabilities"
+    )
+    workstation_parser.set_defaults(func=_cmd_workstation)
+
+    jobs_parser = subparsers.add_parser(
+        "jobs", help="manage the local workstation queue (jobs are not executed yet)", parents=[common]
+    )
+    jobs_actions = jobs_parser.add_subparsers(dest="jobs_action", required=True)
+    jobs_list = jobs_actions.add_parser("list", help="list local jobs")
+    jobs_list.add_argument("--limit", type=int, default=100)
+    jobs_submit = jobs_actions.add_parser("submit", help="store a job without starting it")
+    jobs_submit.add_argument("kind", help="job kind, such as blender or agent")
+    jobs_submit.add_argument("--payload", default="{}", help="job input as a JSON object")
+    jobs_submit.add_argument("--gpus", type=int, default=0, help="number of GPUs required")
+    jobs_submit.add_argument("--min-free-mib", type=int, default=0, help="minimum free MiB per GPU")
+    jobs_submit.add_argument("--job-id", default=None, help="stable ID for safe repeated submission")
+    jobs_cancel = jobs_actions.add_parser("cancel", help="cancel a queued job or request cancellation")
+    jobs_cancel.add_argument("job_id")
+    jobs_events = jobs_actions.add_parser("events", help="read task updates and questions")
+    jobs_events.add_argument("job_id")
+    jobs_events.add_argument("--after", type=int, default=0, help="show events after this sequence number")
+    jobs_answer = jobs_actions.add_parser("answer", help="answer a pending task question")
+    jobs_answer.add_argument("job_id")
+    jobs_answer.add_argument("question_id")
+    jobs_answer.add_argument("answer")
+    jobs_recover = jobs_actions.add_parser("recover", help="resolve a stranded claim after its processes stop")
+    jobs_recover.add_argument("job_id")
+    jobs_recover.add_argument("--reason", required=True)
+    jobs_recover.add_argument("--confirm-stopped", action="store_true")
+    jobs_parser.set_defaults(func=_cmd_jobs)
+
+    remote_parser = subparsers.add_parser("remote", help="control a workstation over authenticated SSH")
+    remote_parser.add_argument("target", help="SSH host or user@host, already trusted in known_hosts")
+    remote_parser.add_argument("--project", required=True, help="SecureLink project directory on the remote computer")
+    remote_parser.add_argument("--port", type=int, default=22, help="remote SSH port")
+    remote_actions = remote_parser.add_subparsers(dest="remote_action", required=True)
+    remote_actions.add_parser("status")
+    remote_actions.add_parser("list")
+    remote_get = remote_actions.add_parser("get")
+    remote_get.add_argument("job_id")
+    remote_submit = remote_actions.add_parser("submit", help="submit a task to an enabled agent")
+    remote_submit.add_argument("kind", choices=["codex", "claude", "opencode"])
+    remote_submit.add_argument("prompt")
+    remote_submit.add_argument("--directory", default=".", help="working directory relative to the remote workspace")
+    remote_submit.add_argument("--gpus", type=int, default=0)
+    remote_submit.add_argument("--min-free-mib", type=int, default=0)
+    remote_submit.add_argument("--job-id", default=None)
+    remote_render = remote_actions.add_parser("render", help="submit a Blender frame render")
+    remote_render.add_argument("scene", help="workspace-relative .blend file")
+    remote_render.add_argument("--frame", type=int, default=1)
+    remote_render.add_argument("--gpus", type=int, default=0)
+    remote_render.add_argument("--min-free-mib", type=int, default=0)
+    remote_render.add_argument("--job-id", default=None)
+    remote_workflow = remote_actions.add_parser("workflow", help="submit an API-format ComfyUI workflow")
+    remote_workflow.add_argument("workflow", help="workspace-relative JSON workflow")
+    remote_workflow.add_argument("--min-free-mib", type=int, default=0)
+    remote_workflow.add_argument("--job-id", default=None)
+    remote_events = remote_actions.add_parser("events")
+    remote_events.add_argument("job_id")
+    remote_events.add_argument("--after", type=int, default=0)
+    remote_cancel = remote_actions.add_parser("cancel")
+    remote_cancel.add_argument("job_id")
+    remote_answer = remote_actions.add_parser("answer")
+    remote_answer.add_argument("job_id")
+    remote_answer.add_argument("question_id")
+    remote_answer.add_argument("answer")
+    remote_parser.set_defaults(func=_cmd_remote)
 
     web_parser = subparsers.add_parser("web", help="run the SecureLink web UI (browser-based)", parents=[common])
     web_parser.add_argument("--host", default="127.0.0.1", help="host to bind (localhost only by design)")

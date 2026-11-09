@@ -181,6 +181,119 @@ def transfer_history(limit: int = 20) -> str:
     return json.dumps(list_transfers(limit=limit))
 
 
+@mcp.tool(description="Inspect this computer's GPUs and detected agent and 3D commands. This is local only.")
+def local_workstation_status() -> str:
+    """Return local capabilities without launching tools or checking credentials."""
+    from core.workstation import local_inventory
+
+    return json.dumps(local_inventory())
+
+
+def _local_job_queue():
+    from core.job_queue import JobQueue
+    return JobQueue(Path.home() / ".securelink" / "workstation-jobs.sqlite3")
+
+
+@mcp.tool(description="List jobs recorded on this computer. No remote worker is connected.")
+def local_jobs(limit: int = 100) -> str:
+    from core.job_queue import JobError
+    try:
+        return json.dumps(_local_job_queue().list(limit))
+    except JobError as exc:
+        return json.dumps({"error": str(exc)})
+
+
+@mcp.tool(description="Store a local job request; this does not launch a worker or execute the job.")
+def submit_local_job(kind: str, payload: dict[str, Any], gpu_count: int = 0,
+                     min_free_mib: int = 0, job_id: str | None = None) -> str:
+    from core.job_queue import JobError
+    try:
+        return json.dumps(_local_job_queue().submit(kind, payload, gpu_count=gpu_count,
+                                                   min_free_mib=min_free_mib, job_id=job_id))
+    except JobError as exc:
+        return json.dumps({"error": str(exc)})
+
+
+@mcp.tool(description="Read progress, questions, and answers for a local workstation job.")
+def local_job_events(job_id: str, after: int = 0) -> str:
+    from core.job_queue import JobError
+    try:
+        return json.dumps(_local_job_queue().events(job_id, after=after))
+    except JobError as exc:
+        return json.dumps({"error": str(exc)})
+
+
+@mcp.tool(description="Answer the current question for a local workstation job.")
+def answer_local_job(job_id: str, question_id: str, answer: str) -> str:
+    from core.job_queue import JobError
+    try:
+        return json.dumps(_local_job_queue().answer_question(job_id, question_id, answer))
+    except JobError as exc:
+        return json.dumps({"error": str(exc)})
+
+
+@mcp.tool(description="Cancel a queued local job or request cancellation of a running one.")
+def cancel_local_job(job_id: str) -> str:
+    from core.job_queue import JobError
+    try:
+        return json.dumps(_local_job_queue().cancel(job_id))
+    except JobError as exc:
+        return json.dumps({"error": str(exc)})
+
+
+@mcp.tool(description="Control a configured SecureLink workstation through verified OpenSSH. "
+          "Methods: status, jobs.list, jobs.get, jobs.submit, jobs.events, jobs.answer, jobs.cancel. "
+          "The remote PC must already have SSH access, SecureLink and a configured worker.")
+def remote_workstation(target: str, project_path: str, method: str,
+                       params: dict[str, Any] | None = None, port: int = 22) -> str:
+    from core.remote_workstation import RemoteError, request
+    allowed = {"status", "jobs.list", "jobs.get", "jobs.submit", "jobs.events", "jobs.answer", "jobs.cancel"}
+    if method not in allowed:
+        return json.dumps({"error": "unsupported workstation method"})
+    try:
+        return json.dumps(request(target, project_path, method, params, port=port))
+    except (RemoteError, ValueError, TypeError) as exc:
+        return json.dumps({"error": str(exc)})
+
+
+@mcp.tool(description="Send a local file up to 8 MiB to the configured remote workstation workspace over SSH. "
+          "Existing remote files are not overwritten.")
+def remote_upload_file(target: str, project_path: str, local_path: str, remote_path: str,
+                       port: int = 22) -> str:
+    import base64
+    from core.remote_workstation import RemoteError, request
+    try:
+        source = Path(local_path)
+        if not source.is_file() or source.stat().st_size > 8 * 1024 * 1024:
+            raise ValueError("file is missing or exceeds the 8 MiB transfer limit")
+        data = source.read_bytes()
+        if len(data) > 8 * 1024 * 1024:
+            raise ValueError("file exceeds the 8 MiB transfer limit")
+        return json.dumps(request(target, project_path, "files.put",
+                                  {"path": remote_path, "data_base64": base64.b64encode(data).decode("ascii")},
+                                  port=port))
+    except (RemoteError, ValueError, OSError) as exc:
+        return json.dumps({"error": str(exc)})
+
+
+@mcp.tool(description="Retrieve a remote workspace file up to 8 MiB over SSH without overwriting a local file.")
+def remote_download_file(target: str, project_path: str, remote_path: str, local_path: str,
+                         port: int = 22) -> str:
+    import base64
+    import binascii
+    from core.remote_workstation import RemoteError, request
+    try:
+        payload = request(target, project_path, "files.get", {"path": remote_path}, port=port)
+        data = base64.b64decode(payload["data_base64"], validate=True)
+        if len(data) > 8 * 1024 * 1024:
+            raise ValueError("file exceeds the 8 MiB transfer limit")
+        with Path(local_path).open("xb") as handle:
+            handle.write(data)
+        return json.dumps({"path": local_path, "size": len(data)})
+    except (RemoteError, ValueError, OSError, KeyError, binascii.Error) as exc:
+        return json.dumps({"error": str(exc)})
+
+
 @mcp.tool(description="Retry a failed transfer recorded in the durable history (send or receive).")
 def retry_transfer(
     direction: str,
