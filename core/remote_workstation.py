@@ -7,10 +7,12 @@ SSH request, while the separately started worker owns job execution.
 from __future__ import annotations
 
 import base64
+import ipaddress
 import json
 import re
 import shutil
 import subprocess
+from pathlib import Path
 from typing import Any
 
 
@@ -21,9 +23,18 @@ class RemoteError(RuntimeError):
 def request(target: str, project_path: str, method: str, params: dict[str, Any] | None = None,
             *, port: int = 22, timeout: float = 30) -> dict[str, Any]:
     """Send one JSON request to a remote Windows or Unix SSH account."""
-    if not isinstance(target, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+(?:@[A-Za-z0-9_.-]+)?", target):
+    if not isinstance(target, str) or target.count("@") > 1:
         raise RemoteError("target must be a hostname or user@hostname")
-    if target.startswith("-") or "@-" in target:
+    user, separator, host = target.partition("@")
+    if not separator:
+        host, user = user, ""
+    if (separator and not user) or (user and (not re.fullmatch(r"[A-Za-z0-9_.-]+", user) or user.startswith("-"))):
+        raise RemoteError("invalid SSH username")
+    try:
+        valid_host = bool(re.fullmatch(r"[A-Za-z0-9_.-]+", host)) or bool(ipaddress.IPv6Address(host))
+    except ValueError:
+        valid_host = False
+    if not valid_host or host.startswith("-"):
         raise RemoteError("invalid SSH target")
     if not isinstance(project_path, str) or not project_path.strip() or len(project_path) > 2048:
         raise RemoteError("remote project path is required")
@@ -43,10 +54,16 @@ def request(target: str, project_path: str, method: str, params: dict[str, Any] 
     body = json.dumps({"method": method, "params": params or {}}, allow_nan=False).encode("utf-8")
     if len(body) > 12 * 1024 * 1024:
         raise RemoteError("request is too large")
+    options = [ssh, "-T", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
+               "-o", "ConnectTimeout=10", "-p", str(port)]
+    # Use the optional dedicated key in addition to the user's existing SSH
+    # identities. Host key verification remains the responsibility of OpenSSH.
+    identity = Path.home() / ".ssh" / "securelink_workstation_ed25519"
+    if identity.is_file():
+        options.extend(["-i", str(identity)])
     try:
         result = subprocess.run(
-            [ssh, "-T", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
-             "-o", "ConnectTimeout=10", "-p", str(port), target, remote_command],
+            [*options, target, remote_command],
             input=body, capture_output=True, timeout=timeout, check=False,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )

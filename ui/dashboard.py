@@ -279,6 +279,7 @@ class DashboardWindow(QMainWindow):
     workstation_loaded = pyqtSignal(object)
     workstation_jobs_loaded = pyqtSignal(object)
     remote_workstation_loaded = pyqtSignal(object)
+    remote_tailscale_loaded = pyqtSignal(object)
 
     def __init__(self, auto_refresh: bool = True) -> None:
         super().__init__()
@@ -845,6 +846,7 @@ class DashboardWindow(QMainWindow):
         self.workstation_loaded.connect(self._render_workstation)
         self.workstation_jobs_loaded.connect(self._render_workstation_jobs)
         self.remote_workstation_loaded.connect(self._render_remote_workstation)
+        self.remote_tailscale_loaded.connect(self._render_remote_tailscale)
         self.peers_loaded.connect(self._render_peers)
         self.local_addresses_loaded.connect(self._render_local_addresses)
         self.tailscale_state_loaded.connect(self._render_tailscale_state)
@@ -1387,12 +1389,28 @@ class DashboardWindow(QMainWindow):
         jobs_layout.addLayout(actions)
         parent_layout.addWidget(jobs_group)
 
-        remote_group = QGroupBox("Remote workstation over SSH")
+        remote_group = QGroupBox("Remote workstation over Tailscale / SSH")
         remote_layout = QVBoxLayout(remote_group)
         remote_hint = QLabel("Use an SSH account and host key already configured on this computer. "
                              "The remote worker must be configured and started separately.")
         remote_hint.setWordWrap(True)
         remote_layout.addWidget(remote_hint)
+        tailscale_row = QHBoxLayout()
+        self.remote_tailscale_peers = QComboBox()
+        self.remote_tailscale_peers.addItem("Find Tailscale devices", None)
+        self.remote_tailscale_username = QLineEdit()
+        self.remote_tailscale_username.setPlaceholderText("Remote Windows username")
+        self.remote_tailscale_refresh = QPushButton("Find Tailscale PCs")
+        self.remote_tailscale_refresh.clicked.connect(self._refresh_remote_tailscale)
+        use_peer = QPushButton("Use selected")
+        use_peer.clicked.connect(self._use_remote_tailscale_peer)
+        for widget in (self.remote_tailscale_peers, self.remote_tailscale_username,
+                       self.remote_tailscale_refresh, use_peer):
+            tailscale_row.addWidget(widget)
+        remote_layout.addLayout(tailscale_row)
+        self.remote_tailscale_hint = QLabel("Tailscale has not been checked.")
+        self.remote_tailscale_hint.setWordWrap(True)
+        remote_layout.addWidget(self.remote_tailscale_hint)
         remote_grid = QGridLayout()
         self.remote_target = QLineEdit()
         self.remote_target.setPlaceholderText("user@computer")
@@ -1568,6 +1586,48 @@ class DashboardWindow(QMainWindow):
                 self.remote_workstation_loaded.emit({"error": str(exc)})
 
         threading.Thread(target=_worker, daemon=True).start()
+
+    def _refresh_remote_tailscale(self) -> None:
+        self.remote_tailscale_refresh.setEnabled(False)
+        self.remote_tailscale_hint.setText("Checking Tailscale…")
+
+        def _worker() -> None:
+            try:
+                from core.discovery import tailscale_status
+                status = tailscale_status()
+                state = tailscale_state(status=status)
+                if not state.installed:
+                    message = "Tailscale was not found on this PC."
+                elif state.running:
+                    message = "Tailscale is connected. Select the other PC and enter its Windows username."
+                else:
+                    message = state.summary() or "Tailscale is not connected."
+                peers = [dict(vars(peer)) for peer in tailscale_peers(status=status)] if state.running else []
+                self.remote_tailscale_loaded.emit({"message": message, "peers": peers})
+            except Exception:
+                self.remote_tailscale_loaded.emit({"message": "Could not read Tailscale status.", "peers": []})
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _render_remote_tailscale(self, data: object) -> None:
+        self.remote_tailscale_refresh.setEnabled(True)
+        if not isinstance(data, dict):
+            self.remote_tailscale_hint.setText("Could not read Tailscale status.")
+            return
+        self.remote_tailscale_peers.clear()
+        self.remote_tailscale_peers.addItem("Select a device", None)
+        for peer in data.get("peers", []):
+            online = "online" if peer.get("metadata", {}).get("online") == "true" else "offline"
+            self.remote_tailscale_peers.addItem(f"{peer['name']} — {peer['address']} ({online})", peer["address"])
+        self.remote_tailscale_hint.setText(str(data.get("message", "")))
+
+    def _use_remote_tailscale_peer(self) -> None:
+        address = self.remote_tailscale_peers.currentData()
+        username = self.remote_tailscale_username.text().strip()
+        if not address or not username:
+            self.remote_tailscale_hint.setText("Select a device and enter its Windows username.")
+            return
+        self.remote_target.setText(f"{username}@{address}")
 
     def _render_remote_workstation(self, data: object) -> None:
         if not isinstance(data, dict):

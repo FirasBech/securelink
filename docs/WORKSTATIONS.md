@@ -16,11 +16,21 @@ before depending on it, especially for unattended or GPU-heavy work.
    credentials, private configuration or test files. To install the included
    application's dependencies on the workstation, run `python -m pip install
    -r requirements-runtime.txt` from its extracted SecureLink folder.
-3. Install and configure OpenSSH Server on the workstation. Set up an SSH key
+3. Install Tailscale and sign both computers into the same tailnet, or share the
+   workstation device with the controller through Tailscale. The desktop
+   Workstation tab can list Tailscale devices and fill the SSH target. Then
+   install and configure OpenSSH Server on the Windows workstation. Set up an SSH key
    for the controller, and verify the workstation host key by a trusted method.
    Confirm that `ssh user@workstation` works with key authentication. SecureLink
    uses `BatchMode=yes` and `StrictHostKeyChecking=yes`: it will not accept a new
    host key or prompt for passwords. Use LAN or a private VPN.
+
+   Windows uses **OpenSSH over Tailscale** here; Tailscale's own SSH server does
+   not run on Windows. SecureLink optionally uses the dedicated private key
+   `~/.ssh/securelink_workstation_ed25519` if present, alongside ordinary SSH
+   identities. Install only its `.pub` public key into the remote account's
+   OpenSSH authorized keys; never copy its private key. Verify the remote SSH
+   host fingerprint with the workstation owner before accepting it.
 4. In the workstation's SecureLink project directory, choose an existing
    workspace for jobs and files:
 

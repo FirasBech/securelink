@@ -49,6 +49,8 @@ class TailscaleState:
             return ""  # Tailscale isn't used here; say nothing
         if not self.running and not self.logged_in and not self.backend_state:
             return "Tailscale is installed but its service isn't running — start Tailscale to use VPN peers."
+        if self.backend_state == "NoState":
+            return "Tailscale has not finished starting; check the Tailscale app and try again."
         if not self.logged_in:
             return "Tailscale is installed but not signed in — run 'tailscale up' to use VPN peers."
         if not self.running:
