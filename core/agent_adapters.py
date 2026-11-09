@@ -13,14 +13,91 @@ import subprocess
 import tempfile
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from core.worker import WorkerCancelled, WorkerContext
+from core.worker import WorkerCancelled, WorkerContext, WorkloadStillRunning
+from core.process_guard import WindowsProcessGuard
 
 
-class WorkloadStillRunning(BaseException):
-    """Do not release a reservation when a process cannot be stopped."""
+@contextmanager
+def _output_file():
+    """Do not let a temporary-file close error mask an uncertain workload."""
+    handle = tempfile.TemporaryFile(mode="w+b")
+    try:
+        yield handle
+    finally:
+        try:
+            handle.close()
+        except Exception:
+            pass
+
+
+def _wait_process(process: subprocess.Popen, guard: Any, context: WorkerContext) -> None:
+    """Wait for a process or verified GPU tree; fail closed on cleanup errors."""
+    try:
+        while guard.active() if guard else process.poll() is None:
+            if context():
+                guard.terminate() if guard else _stop_process(process)
+                raise WorkerCancelled()
+            time.sleep(0.5)
+    except BaseException:
+        if guard:
+            try:
+                if guard.active():
+                    guard.terminate()
+                if guard.active():
+                    raise WorkloadStillRunning("GPU process tree remains active")
+            except BaseException as exc:
+                raise WorkloadStillRunning("Could not verify that the GPU process tree stopped") from exc
+        elif process.poll() is None:
+            _stop_process(process)
+        raise
+    finally:
+        if guard:
+            try:
+                guard.close()
+            except BaseException as exc:
+                if not guard.verified_empty:
+                    raise WorkloadStillRunning("Could not close an unverified GPU process tree") from exc
+                raise
+    process.wait(timeout=5)
+
+
+@contextmanager
+def _tracked_process(argv: list[str], kwargs: dict[str, Any], context: WorkerContext, use_gpu: bool):
+    """Own startup, handoff and cleanup; leave uncertain GPU claims reserved."""
+    guard = None
+    process = None
+    if use_gpu:
+        context.arm_gpu_workload()
+    try:
+        guard = WindowsProcessGuard(argv, kwargs) if use_gpu else None
+        process = guard.process if guard else subprocess.Popen(argv, **kwargs)
+        yield process, guard
+    except BaseException:
+        if guard and guard.job:
+            try:
+                if guard.active():
+                    guard.terminate()
+                if guard.active():
+                    raise WorkloadStillRunning("GPU process tree remains active")
+            except BaseException as exc:
+                raise WorkloadStillRunning("Could not verify GPU process cleanup") from exc
+            finally:
+                try:
+                    guard.close()
+                except BaseException as exc:
+                    if not guard.verified_empty:
+                        raise WorkloadStillRunning("Could not close an unverified GPU process tree") from exc
+                    raise
+        elif not guard and process is not None and process.poll() is None:
+            _stop_process(process)
+        raise
+    finally:
+        if guard and guard.verified_empty:
+            context.confirm_gpu_stopped()
 
 
 def workspace_path(root: Path, relative: str = ".") -> Path:
@@ -65,15 +142,14 @@ def agent_adapter(provider: str, workspace: Path, executable: str | None = None)
         env["CUDA_VISIBLE_DEVICES"] = ",".join(job["gpu_uuids"])
         context.progress(f"Starting {provider}")
         # A file avoids deadlocking a child on a full pipe while it works.
-        with tempfile.TemporaryFile(mode="w+b") as output:
+        with _output_file() as output:
             kwargs: dict[str, Any] = {"cwd": str(cwd), "env": env, "stdin": subprocess.PIPE,
                                       "stdout": output, "stderr": subprocess.STDOUT}
             if os.name == "nt":
                 kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
             else:
                 kwargs["start_new_session"] = True
-            process = subprocess.Popen(argv, **kwargs)
-            try:
+            with _tracked_process(argv, kwargs, context, bool(job["gpu_uuids"])) as (process, guard):
                 def send_input() -> None:
                     try:
                         if process.stdin is not None and provider != "opencode":
@@ -85,15 +161,7 @@ def agent_adapter(provider: str, workspace: Path, executable: str | None = None)
                             process.stdin.close()
 
                 threading.Thread(target=send_input, daemon=True).start()
-                while process.poll() is None:
-                    if context():
-                        _stop_process(process)
-                        raise WorkerCancelled()
-                    time.sleep(0.5)
-            except BaseException:
-                if process.poll() is None:
-                    _stop_process(process)
-                raise
+                _wait_process(process, guard, context)
             output.seek(0, os.SEEK_END)
             size = output.tell()
             output.seek(max(0, size - 262144))
@@ -128,24 +196,15 @@ def blender_adapter(workspace: Path, executable: str | None = None):
         env = os.environ.copy()
         env["CUDA_VISIBLE_DEVICES"] = ",".join(job["gpu_uuids"])
         context.progress("Starting Blender render")
-        with tempfile.TemporaryFile(mode="w+b") as output:
+        with _output_file() as output:
             kwargs: dict[str, Any] = {"cwd": str(workspace), "env": env, "stdin": subprocess.DEVNULL,
                                       "stdout": output, "stderr": subprocess.STDOUT}
             if os.name == "nt":
                 kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
             else:
                 kwargs["start_new_session"] = True
-            process = subprocess.Popen(argv, **kwargs)
-            try:
-                while process.poll() is None:
-                    if context():
-                        _stop_process(process)
-                        raise WorkerCancelled()
-                    time.sleep(0.5)
-            except BaseException:
-                if process.poll() is None:
-                    _stop_process(process)
-                raise
+            with _tracked_process(argv, kwargs, context, bool(job["gpu_uuids"])) as (process, guard):
+                _wait_process(process, guard, context)
             output.seek(0, os.SEEK_END)
             size = output.tell()
             output.seek(max(0, size - 4000))

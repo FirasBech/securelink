@@ -87,9 +87,11 @@ def comfy_adapter(workspace: Path, url: str, gpu_uuid: str, *, poll_interval: fl
         context.progress("Submitting ComfyUI workflow")
         # A failed POST can still have been accepted; never release a GPU on
         # an ambiguous submission or loss of contact with a running backend.
+        context.arm_gpu_workload()
         try:
             response = _json_request(base + "/prompt", {"prompt": graph, "client_id": job["id"]})
         except WorkflowRejected:
+            context.confirm_gpu_stopped()
             raise
         except Exception as exc:
             raise WorkloadStillRunning("ComfyUI submission outcome unknown; verify server before recovery") from exc
@@ -97,6 +99,7 @@ def comfy_adapter(workspace: Path, url: str, gpu_uuid: str, *, poll_interval: fl
         if not isinstance(prompt_id, str) or not prompt_id:
             # An explicit error response establishes that no prompt was queued.
             if response.get("error") or response.get("node_errors"):
+                context.confirm_gpu_stopped()
                 raise ValueError("ComfyUI rejected the workflow: " + str(response.get("error", response.get("node_errors"))))
             raise WorkloadStillRunning("ComfyUI returned no prompt ID; verify server before recovery")
         try:
@@ -118,8 +121,10 @@ def comfy_adapter(workspace: Path, url: str, gpu_uuid: str, *, poll_interval: fl
             if isinstance(item, dict):
                 status = item.get("status", {})
                 if isinstance(status, dict) and status.get("status_str") == "error":
+                    context.confirm_gpu_stopped()
                     raise RuntimeError("ComfyUI workflow failed; inspect its history on the workstation")
                 if isinstance(status, dict) and status.get("completed") is True:
+                    context.confirm_gpu_stopped()
                     if cancelled:
                         raise WorkerCancelled()
                     return {"prompt_id": prompt_id, "outputs": item.get("outputs", {})}

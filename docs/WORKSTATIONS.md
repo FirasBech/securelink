@@ -111,6 +111,17 @@ environment setting, not a hardware isolation mechanism. Programs that ignore
 it, an existing external server, games and other applications can still use
 those GPUs. VRAM is not automatically pooled across cards.
 
+On Windows, GPU-backed agent and Blender subprocesses start suspended inside a
+Job Object, and their reservation remains held until the tracked process tree
+has exited. Cancellation terminates that job object. If process startup or
+cleanup cannot be verified, the reservation is retained for manual recovery,
+even when it later turns out no process started. Windows
+does not automatically include processes created via `Win32_Process.Create`,
+and external services are outside the Job Object, so this is not a complete
+isolation boundary. GPU subprocess tracking on non-Windows systems is not yet
+implemented and such jobs fail before launch. ComfyUI is an external service
+and uses its separate, conservative completion checks.
+
 With the CLI, `python -m ui.cli jobs list` shows local jobs and `jobs events
 JOB_ID` shows their updates. The local MCP tools provide the same operations.
 A stable caller-supplied job ID makes repeat submission idempotent. If an SSH

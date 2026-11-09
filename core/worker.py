@@ -1,9 +1,7 @@
-"""Explicit, adapter-based local worker primitives.
+"""Adapter-based local worker primitives for the opt-in workstation service.
 
-There is deliberately no background service, remote listener, shell executor,
-or built-in agent adapter. Adapters are trusted Python callables supplied by
-the host application. They must finish or stop their workload before returning
-or raising; only then can this module safely release GPU reservations.
+Adapters are trusted Python callables and must finish or stop their workload
+before returning or raising; only then can GPU reservations be released.
 """
 from __future__ import annotations
 
@@ -19,11 +17,24 @@ class WorkerCancelled(Exception):
     """Raised by an adapter after it has stopped a cancelled workload."""
 
 
+class WorkloadStillRunning(BaseException):
+    """A worker cannot prove a workload stopped; retain its reservation."""
+
+
 class WorkerContext:
     """Adapter-facing task updates and cooperative cancellation."""
 
     def __init__(self, queue: JobQueue, job_id: str, token: str) -> None:
         self._queue, self._job_id, self._token = queue, job_id, token
+        self._gpu_workload_uncertain = False
+
+    def arm_gpu_workload(self) -> None:
+        """Call before a GPU process might be created, even if startup fails."""
+        self._gpu_workload_uncertain = True
+
+    def confirm_gpu_stopped(self) -> None:
+        """Call only after the complete tracked process tree is verified empty."""
+        self._gpu_workload_uncertain = False
 
     def __call__(self) -> bool:
         current = self._queue.get(self._job_id)
@@ -69,16 +80,23 @@ class LocalWorker:
         if claim is None:
             return None
         job, token = claim
+        context = WorkerContext(self.queue, job["id"], token)
 
         try:
-            result = self.adapters[job["kind"]](job, WorkerContext(self.queue, job["id"], token))
+            result = self.adapters[job["kind"]](job, context)
+            if context._gpu_workload_uncertain:
+                raise WorkloadStillRunning("GPU workload completion was not verified")
             if not isinstance(result, dict):
                 raise TypeError("adapter result must be an object")
             json.dumps(result, allow_nan=False)
             if self.queue.get(job["id"])["status"] == "waiting_input":
                 raise RuntimeError("adapter returned before its question was answered")
-        except WorkerCancelled:
+        except WorkerCancelled as exc:
+            if context._gpu_workload_uncertain:
+                raise WorkloadStillRunning("GPU workload cancellation was not verified") from exc
             return self.queue.finish(job["id"], token, "cancelled")
         except Exception as exc:
+            if context._gpu_workload_uncertain:
+                raise WorkloadStillRunning("GPU workload startup or cleanup was not verified") from exc
             return self.queue.finish(job["id"], token, "failed", {"error": str(exc)})
         return self.queue.finish(job["id"], token, "completed", result)
